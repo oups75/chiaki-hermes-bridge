@@ -880,6 +880,39 @@ def save_classification_record(
     return {"screenshot_saved": png_rel, "classification_saved": json_rel, "action": action}
 
 
+
+def ask_classification_approval(classification: dict) -> dict:
+    """Prompt user on stderr to approve or correct the classification.
+
+    Returns dict with keys: approved (bool), approved_label (str).
+    Non-interactive (no TTY): auto-approves and logs to stderr.
+    """
+    page = classification.get("page") or classification.get("label") or "unknown"
+    score = classification.get("local_score") or (classification.get("match") or {}).get("score") or 0
+    method = classification.get("method") or "none"
+
+    print(f"\n[classify] page: {page!r}  score: {score:.3f}  method: {method}", file=sys.stderr)
+
+    if not sys.stdin.isatty():
+        print("[classify] non-interactive — auto-approved", file=sys.stderr)
+        return {"approved": True, "approved_label": page}
+
+    try:
+        answer = input(
+            f"[classify] Approve '{page}'? [Enter=yes / type correct label / n to reject]: "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[classify] approval skipped", file=sys.stderr)
+        return {"approved": None, "approved_label": page}
+
+    if answer == "" or answer.lower() in ("y", "yes"):
+        return {"approved": True, "approved_label": page}
+    if answer.lower() in ("n", "no"):
+        return {"approved": False, "approved_label": page}
+    # User typed a corrected label
+    return {"approved": True, "approved_label": answer}
+
+
 def command_scene(args: argparse.Namespace) -> int:
     store = LearningStore(args.learning_root, namespace=args.namespace)
     try:
@@ -891,6 +924,8 @@ def command_scene(args: argparse.Namespace) -> int:
     code, payload = capture_scene_state(args, store, embedder)
     screenshot_path = Path(getattr(args, "output", "/tmp/chiaki-screenshot.png"))
     payload.pop("embedding", None)
+    approval = ask_classification_approval(payload) if getattr(args, "approve", False) else {"approved": None, "approved_label": payload.get("page") or payload.get("label")}
+    payload.update(approval)
     saved = save_classification_record(args.learning_root, args.namespace, screenshot_path, payload, store)
     payload.pop("_embedding", None)
     payload.update(saved)
@@ -959,6 +994,8 @@ def command_classify(args: argparse.Namespace) -> int:
     if getattr(args, "include_embedding", False):
         result["embedding"] = embedding
 
+    approval = ask_classification_approval(result) if getattr(args, "approve", False) else {"approved": None, "approved_label": result.get("page") or result.get("label")}
+    result.update(approval)
     saved = save_classification_record(args.learning_root, args.namespace, path if path.exists() else None, result, store)
     result.update(saved)
     json_print(result)
@@ -1798,6 +1835,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     scene = subparsers.add_parser("scene")
     add_scene_args(scene)
+    scene.add_argument("--approve", action="store_true", help="Prompt user to approve or correct classification before saving")
 
     remember_scene = subparsers.add_parser("remember-scene")
     add_scene_args(remember_scene)
@@ -1844,6 +1882,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     classify = subparsers.add_parser("classify")
     add_scene_args(classify)
+    classify.add_argument("--approve", action="store_true", help="Prompt user to approve or correct classification before saving")
 
     background_learn = subparsers.add_parser("background-learn")
     add_screenshot_args(background_learn)
