@@ -1844,4 +1844,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import os
+    rc = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)
