@@ -11,8 +11,10 @@ import ipaddress
 from pathlib import Path
 from typing import Any
 
+import pytesseract
+from PIL import Image
+
 from scene_learning import (
-    DeepInfraClipClassifier,
     LearningBuffer,
     LearningStore,
     SceneLearningError,
@@ -67,6 +69,7 @@ BUTTON_NAMES = (
 BUTTON_ALIASES = {
     "triangle": "pyramid",
     "circle": "moon",
+    "square": "box",
     "dpad_up": "d-pad_up",
     "dpad_down": "d-pad_down",
     "dpad_left": "d-pad_left",
@@ -94,8 +97,113 @@ class RemoteDiscoveryError(RuntimeError):
         self.candidates = candidates or []
 
 
+# Card position tracking for HUT Team Sets (scene navigation state)
+SCENE_STATE_FILE = Path.home() / ".local/share/chiaki-remote-gateway/scene-state.json"
+
+def load_scene_state() -> dict:
+    """Load scene state from disk, or return defaults."""
+    if SCENE_STATE_FILE.exists():
+        try:
+            with open(SCENE_STATE_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {
+        "hut_team_sets": {
+            "selected_index": 1,
+            "cards": [
+                {"name": "Playoff Chew", "label": "playoff_chew"},
+                {"name": "Team of the Week", "label": "team_of_the_week"},
+                {"name": "Playoffs", "label": "playoffs"},
+                {"name": "Nester", "label": "nester"},
+                {"name": "Hockey", "label": "hockey"},
+            ]
+        }
+    }
+
+def save_scene_state(state: dict) -> None:
+    """Save scene state to disk."""
+    SCENE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SCENE_STATE_FILE, 'w') as f:
+        json.dump(state, f, indent=2)
+
+def get_scene_state() -> dict:
+    """Get current scene state (lazy load)."""
+    if not hasattr(get_scene_state, '_state'):
+        get_scene_state._state = load_scene_state()
+    return get_scene_state._state
+
+def update_card_position(scene_label: str, direction: str) -> dict | None:
+    """Update card selection position when navigating with left_stick."""
+    state_dict = get_scene_state()
+    if scene_label not in state_dict:
+        return None
+    
+    state = state_dict[scene_label]
+    cards = state["cards"]
+    
+    if direction == "left_stick_right":
+        state["selected_index"] = (state["selected_index"] + 1) % len(cards)
+    elif direction == "left_stick_left":
+        state["selected_index"] = (state["selected_index"] - 1) % len(cards)
+    
+    save_scene_state(state_dict)
+    return cards[state["selected_index"]]
+
+def get_selected_card(scene_label: str) -> dict | None:
+    """Get current selected card for a scene."""
+    state_dict = get_scene_state()
+    if scene_label not in state_dict:
+        return None
+    state = state_dict[scene_label]
+    return state["cards"][state["selected_index"]]
+
+
+def match_card_set_name(ocr_text: str, hut_sets_db: list[str]) -> str | None:
+    """Match OCR-extracted text to official HUT card set names using fuzzy matching."""
+    from difflib import SequenceMatcher
+    
+    # Normalize OCR text (remove special chars, lowercase)
+    ocr_normalized = ''.join(c.lower() for c in ocr_text if c.isalnum() or c.isspace()).split()
+    ocr_phrase = ' '.join(ocr_normalized)
+    
+    # Score each known set
+    best_match = None
+    best_score = 0.6  # Minimum confidence threshold
+    
+    for known_set in hut_sets_db:
+        known_normalized = known_set.lower()
+        score = SequenceMatcher(None, ocr_phrase, known_normalized).ratio()
+        
+        if score > best_score:
+            best_score = score
+            best_match = known_set
+    
+    return best_match
+
+def load_hut_sets_db() -> list[str]:
+    """Load official HUT card sets from database."""
+    try:
+        db_path = Path.home() / ".local/share/chiaki-remote-gateway/hut-card-sets.json"
+        with open(db_path) as f:
+            db = json.load(f)
+        return db.get("card_sets", [])
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
 def json_print(payload: dict) -> None:
     print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+def extract_ocr_text(image_path: Path, langs: str = "eng") -> str:
+    """Extract text from image using Tesseract OCR."""
+    try:
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img, lang=langs)
+        return text.strip()
+    except Exception as e:
+        return f"[OCR error: {e}]"
+
 
 
 def process_running(pattern: str) -> bool:
@@ -783,17 +891,6 @@ def capture_scene_state(
     try:
         embedding = embedder.embed(path)
         match = store.match_scene(embedding, args.scene_threshold)
-        deepinfra_classification: dict | None = None
-
-        # DeepInfra CLIP fallback when local match fails
-        if not match["matched"]:
-            try:
-                classifier = DeepInfraClipClassifier()
-                candidate_labels = [s["label"] for s in store.scenes()]
-                candidate_labels.append("unknown")
-                deepinfra_classification = classifier.classify(path, candidate_labels)
-            except SceneLearningError:
-                deepinfra_classification = None
 
         scene_metadata: dict = {"source": screenshot_payload["source"]}
         if getattr(args, "page", None):
@@ -820,7 +917,6 @@ def capture_scene_state(
             "page": page if match["matched"] else "unknown",
             "available_actions": available_actions,
             "match": match,
-            "deepinfra_classification": deepinfra_classification,
             "learned_scene": {
                 "id": learned["id"],
                 "label": learned["label"],
@@ -969,7 +1065,7 @@ def command_scene(args: argparse.Namespace) -> int:
 
 
 def command_classify(args: argparse.Namespace) -> int:
-    """Classify a screenshot: local embed first, DeepInfra CLIP fallback."""
+    """Classify a screenshot using local torchvision embedding."""
     store = LearningStore(args.learning_root, namespace=args.namespace)
     try:
         embedder = TorchvisionEmbedder()
@@ -994,8 +1090,10 @@ def command_classify(args: argparse.Namespace) -> int:
 
     try:
         embedding = embedder.embed(path)
+        ocr_text = extract_ocr_text(path)
         match = store.match_scene(embedding, args.scene_threshold)
         result["local_score"] = match["score"]
+        result["ocr_text"] = ocr_text
 
         if match["matched"] and match["scene"]:
             result["matched"] = True
@@ -1004,20 +1102,7 @@ def command_classify(args: argparse.Namespace) -> int:
             meta = match["scene"].get("metadata", {})
             result["page"] = meta.get("page") or match["scene"]["label"]
             result["available_actions"] = meta.get("available_actions")
-        else:
-            # DeepInfra fallback
-            try:
-                classifier = DeepInfraClipClassifier()
-                candidate_labels = [s["label"] for s in store.scenes()]
-                if not candidate_labels:
-                    candidate_labels = ["unknown"]
-                classification = classifier.classify(path, candidate_labels)
-                result["deepinfra_classification"] = classification
-                result["matched"] = classification["score"] >= args.scene_threshold
-                result["label"] = classification["label"]
-                result["method"] = "deepinfra"
-            except SceneLearningError as exc:
-                result["deepinfra_error"] = str(exc)
+
     except SceneLearningError as exc:
         result["ok"] = False
         result["error"] = str(exc)
@@ -1028,6 +1113,13 @@ def command_classify(args: argparse.Namespace) -> int:
     if getattr(args, "include_embedding", False):
         result["embedding"] = embedding
 
+    # Add tracked card position if current scene is hut_team_sets
+    if result.get("label") == "hut_team_sets":
+        selected = get_selected_card("hut_team_sets")
+        if selected:
+            result["selected_card"] = selected
+            result["position_index"] = get_scene_state()["hut_team_sets"]["selected_index"]
+    
     approval = ask_classification_approval(result) if getattr(args, "approve", False) else {"approved": None, "approved_label": result.get("page") or result.get("label")}
     result.update(approval)
     saved = save_classification_record(args.learning_root, args.namespace, path if path.exists() else None, result, store)
@@ -1696,6 +1788,14 @@ def command_press(args: argparse.Namespace) -> int:
             {"type": "button", "button": sent, "requested_button": args.button}
         )
     payload = {"ok": ok, "button": args.button, "sent": sent}
+    
+    # Update card position tracking if navigating HUT Team Sets
+    if sent in ("left_stick_right", "left_stick_left"):
+        selected = update_card_position("hut_team_sets", sent)
+        if selected:
+            payload["selected_card"] = selected
+            payload["position_index"] = get_scene_state()["hut_team_sets"]["selected_index"]
+    
     if args.interval_ms is not None:
         payload["interval_ms"] = args.interval_ms
     json_print(payload)

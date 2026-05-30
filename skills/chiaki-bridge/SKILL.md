@@ -62,7 +62,9 @@ All gateway commands accept:
 
 Button names:
 
-`cross`, `circle`, `box`, `triangle`, `dpad_up`, `dpad_down`, `dpad_left`, `dpad_right`, `l1`, `r1`, `l3`, `r3`, `options`, `touchpad`, `ps`, `none`
+`cross`, `moon`/`circle`, `box`/`square`, `pyramid`/`triangle`, `d-pad_up`, `d-pad_down`, `d-pad_left`, `d-pad_right`, `l1`, `r1`, `l2`, `r2`, `l3`, `r3`, `left_stick_up`, `left_stick_down`, `left_stick_left`, `left_stick_right`, `options`, `touchpad`, `ps`, `none`
+
+Aliases (`circle`, `square`, `triangle`, `dpad_*`, `lstick_*`, `rstick_*`) resolve automatically.
 
 ## Gateway Subcommands
 
@@ -365,6 +367,49 @@ Missing library fix:
 ```bash
 cp /run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/chiaki-ng/build/lib/libchiaki_lib.so.1 /home/soloway/Applications/Games/ps/chiaki/lib/
 ```
+
+## NHL26 HUT STORE Navigation
+
+The STORE left panel (ITEM INBOX / UNOPENED PACKS / PURCHASE NHL POINTS) uses **left stick**, not d-pad:
+
+- `left_stick_right` → selects UNOPENED PACKS (d-pad right goes to carousel panel, skipping UNOPENED PACKS)
+- `left_stick_left` → returns to ITEM INBOX
+- d-pad `down` from ITEM INBOX → PURCHASE NHL POINTS
+- `cross` on ITEM INBOX → enters inbox (INBOX EMPTY if empty)
+- `cross` on UNOPENED PACKS → enters pack list view
+- `pyramid`/`triangle` from UNOPENED PACKS view → GO TO STORE pack browser
+
+## NHL26 HUT Task: Open Pack and Send to Collection
+
+From STORE tab, ITEM INBOX selected:
+
+```
+left_stick_right          # select UNOPENED PACKS
+cross                     # enter pack list
+cross                     # select first pack → "OPEN NOW / OPEN LATER" dialog
+cross                     # OPEN NOW → pack animation, first card revealed
+box                       # □ REVEAL ALL (reveals all remaining face-down cards)
+l3                        # QUICK OPTIONS → "SEND ALL TO MY COLLECTION / QUICK SELL ALL / CANCEL"
+cross                     # SEND ALL TO MY COLLECTION → "ITEM(S) SENT TO COLLECTION"
+```
+
+Notes:
+- `box` = square button (alias `square` also works after gateway fix)
+- `l3` = left stick click = QUICK OPTIONS shortcut for batch collection/sell
+- Pack opening screenshots saved to: `learning/screenshots/ps/tasks/open-pack/`
+- Use visual state machine (screenshot-driven polling) — never fixed-time waits; animations vary per pack
+
+## CHOICE PACK Rule — NEVER Auto-Open
+
+Choice packs (title contains "CHOICE PACK", bottom text shows "Choose N Item(s) / N Selection Round") require manual player selection. The game shows a player list before revealing cards.
+
+**Automation must NEVER press OPEN NOW on a choice pack.**
+
+Detection: read pack title text from the UNOPENED PACKS list view — title is visible on screen when pack is selected/highlighted, before any dialog opens. If "CHOICE" in title → do NOT press cross. No need to open the dialog to detect a choice pack.
+
+Recovery (if OPEN NOW accidentally pressed): press circle/moon immediately to back out before selection round starts. If already in selection round, make a pick — do NOT abandon mid-selection.
+
+Choice packs to open manually via player list UI, not batch automation.
 
 ## Debugging Checklist
 
