@@ -1,6 +1,6 @@
 ---
-name: chiaki-bridge-setup
-description: Use this skill whenever the user asks to launch, verify, control, screenshot, learn scenes, or troubleshoot the PlayStation through Chiaki and Hermes. Covers the current RemoteController Qt Remote Objects gateway, legacy Hermes bridge failures, PySide6 helper commands, CLIP scene learning, NHL/HUT learned navigation, and startup/profile pitfalls.
+name: chiaki-bridge
+description: Use this skill whenever the user asks to launch, verify, control, screenshot, classify, learn scenes, identify cards, or troubleshoot PlayStation/PS5 games through Chiaki and Hermes, especially NHL26 and HUT workflows. Covers the current RemoteController Qt Remote Objects gateway, PySide6 helper commands, CLIP scene/card recognition, per-game namespaces, NHL26/HUT learned navigation, startup/profile pitfalls, and legacy Hermes bridge failures.
 compatibility: Requires Python 3, PySide6 with QtRemoteObjects, and a Chiaki build that exposes `RemoteController` at `local:chiaki-current-session`. Scene learning requires `torch`, `transformers`, Pillow, and `openai/clip-vit-base-patch32`.
 ---
 
@@ -14,7 +14,9 @@ Use this skill for PlayStation control through Chiaki on this machine:
 - connect to the current `RemoteController` replica
 - press controller buttons
 - capture screenshots from `getScreenShot()`
-- classify/remember scenes and run learned tasks
+- classify/remember PlayStation and game scenes with CLIP
+- identify NHL26/HUT cards from imported card images
+- run learned tasks only after scene confirmation
 - debug old `local:hermes_chiaki_bridge` bridge setup when explicitly needed
 
 Prefer the current RemoteController path. Use the legacy Hermes bridge path only when troubleshooting old setup or old logs.
@@ -104,11 +106,21 @@ Common namespaces:
 - `nhl-common`
 - `fifa26`
 
+Use namespaces deliberately:
+
+- PlayStation home/system UI: `--namespace ps`
+- NHL26 UI, HUT menus, active NHL26 routes: `--namespace nhl26`
+- Shared NHL/HUT patterns that transfer across yearly games: `--namespace nhl-common`
+- Older NHL25-only screens: `--namespace nhl25`
+
+When the user says "PlayStation", "PS5", "PS games", or asks to inspect the console without naming a game, default to `ps`. When they say "NHL26", "HUT", "cards", "auction", "squad", "objectives", or "packs", default to `nhl26`. Use `nhl-common` only for shared generic NHL navigation patterns, not current NHL26 card/player identity.
+
 Scene metadata should include:
 
 - `page`
 - `active_element`
 - `available_actions`
+- `game` for game-specific scenes, e.g. `nhl26`
 - optional `card_id`
 - optional `player_name`
 - optional `card_type`
@@ -124,6 +136,74 @@ Unknown scene policy:
 
 NHL/HUT card identification should focus on card ID and player name before card category.
 
+## PlayStation/Game CLIP Workflow
+
+CLIP is for visual state recognition, not autonomous decision-making. Use it to answer: "what screen/card/menu is visible?" Then use learned routes or user instructions for actions.
+
+For any PlayStation/game context:
+
+1. Ensure the stream is ready:
+
+```bash
+HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py wait-session
+```
+
+2. Capture and match the scene in the right namespace:
+
+```bash
+HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace ps scene
+HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace nhl26 scene
+```
+
+3. Use `classify` only when local scene match is missing or low-confidence. It tries local CLIP embeddings first and may fall back to DeepInfra CLIP using learned scene labels as candidates:
+
+```bash
+HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace nhl26 classify --keep-screenshot
+```
+
+4. If result is unknown, ask the user what the visible screen is before pressing buttons or saving a route.
+
+5. After user confirms a label, save it with a game-specific name:
+
+```bash
+HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace nhl26 remember-scene "nhl26 hut auction search results"
+```
+
+Use labels that encode game + mode + page + active element when possible, for example:
+
+- `ps home game tile chiaki`
+- `nhl26 hut main menu`
+- `nhl26 hut auction search results`
+- `nhl26 hut item details card focused`
+- `nhl26 world of chel main menu`
+
+Never learn vague labels like `menu`, `screen1`, or `unknown`.
+
+## NHL26/HUT Card Recognition
+
+For NHL26 card workflows, seed CLIP with HUT builder card images before relying on screenshots:
+
+```bash
+HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace nhl26 card-model-import --hutbuilder-output /run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/hutbuilder/output/
+```
+
+The import stores labels as `card-<card_id>` with metadata:
+
+- `card_id`
+- `player_name`
+- `card_type`
+- `source: hutbuilder-import`
+- `page: card_view`
+
+When a visible NHL26 card is in focus:
+
+1. Run `--namespace nhl26 scene` or `classify`.
+2. Prefer exact `card_id` metadata over category/card type.
+3. Report player name and card ID together when available.
+4. If CLIP score is below threshold, keep screenshot and ask user before recording feedback.
+
+Use `feedback good|bad` after user confirms whether a match was correct. Good feedback strengthens trusted labels; bad feedback prevents repeating wrong card/menu assumptions.
+
 ## CLIP Embedder
 
 Scene embeddings use `openai/clip-vit-base-patch32` through Hugging Face `transformers`.
@@ -136,10 +216,12 @@ HOME=/home/soloway python3 -c "from transformers import CLIPModel, CLIPProcessor
 
 Important pitfall:
 
-- `CLIPModel.get_image_features()` output handling must use projected image embeddings when available.
-- If output has `.image_embeds`, use that.
-- If output has `.pooler_output`, use that.
-- Only then fall back to tensor squeeze.
+- In transformers 5.x, `CLIPModel.get_image_features()` and `get_text_features()` return a dict-like `BaseModelOutputWithPooling`, not a raw tensor.
+- Extract `['pooler_output']` before normalization.
+- Do not use `.image_embeds`; it is not present on this return object.
+- Do not use `['last_hidden_state']` for similarity; it is sequence output, not pooled CLIP embedding.
+- Local scene matching compares normalized CLIP image embeddings with cosine similarity; default threshold is `0.88`.
+- For NHL26 cards, start with the default card threshold, then lower only when user accepts more false positives.
 
 Embedding dimension:
 
@@ -148,7 +230,7 @@ Embedding dimension:
 
 See nested reference:
 
-`/home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/chiaki-clip-embedder/SKILL.md`
+`chiaki-clip-embedder/SKILL.md`
 
 ## Cron Jobs
 
