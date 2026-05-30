@@ -36,22 +36,50 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 DEFAULT_WINDOW_CLASS = "chiaki"
 BUTTON_NAMES = (
     "cross",
-    "circle",
+    "moon",
     "box",
-    "triangle",
-    "dpad_up",
-    "dpad_down",
-    "dpad_left",
-    "dpad_right",
+    "pyramid",
+    "d-pad_up",
+    "d-pad_down",
+    "d-pad_left",
+    "d-pad_right",
     "l1",
     "r1",
+    "l2",
+    "r2",
     "l3",
     "r3",
+    "left_stick_up",
+    "left_stick_down",
+    "left_stick_left",
+    "left_stick_right",
+    "right_stick_up",
+    "right_stick_down",
+    "right_stick_left",
+    "right_stick_right",
     "options",
+    "share",
     "touchpad",
     "ps",
     "none",
 )
+# Aliases for human-friendly names used in metadata/UI
+BUTTON_ALIASES = {
+    "triangle": "pyramid",
+    "circle": "moon",
+    "dpad_up": "d-pad_up",
+    "dpad_down": "d-pad_down",
+    "dpad_left": "d-pad_left",
+    "dpad_right": "d-pad_right",
+    "rstick_left": "right_stick_left",
+    "rstick_right": "right_stick_right",
+    "rstick_up": "right_stick_up",
+    "rstick_down": "right_stick_down",
+    "lstick_left": "left_stick_left",
+    "lstick_right": "left_stick_right",
+    "lstick_up": "left_stick_up",
+    "lstick_down": "left_stick_down",
+}
 
 
 class RemoteSelectionRequired(RuntimeError):
@@ -290,6 +318,7 @@ class RemoteControllerClient:
         return result[0] if result else b""
 
     def send(self, button_name: str, interval_ms: int | None = None) -> str:
+        button_name = BUTTON_ALIASES.get(button_name, button_name)
         if interval_ms is not None:
             if not self.replica.setProperty("pressIntervalMs", int(interval_ms)):
                 raise RuntimeError("Failed to set RemoteController pressIntervalMs")
@@ -1703,10 +1732,17 @@ def command_actions(args: argparse.Namespace) -> int:
         json_print(payload)
         return code
 
+    try:
+        client = RemoteControllerClient(args.remote_url, args.remote_name)
+        client.wait_ready(2000)
+        live_buttons = client.replica.property("availavleButtons")
+        buttons = list(live_buttons) if live_buttons else list(BUTTON_NAMES)
+    except Exception:
+        buttons = list(BUTTON_NAMES)
     json_print(
         {
             "ok": True,
-            "buttons": list(BUTTON_NAMES),
+            "buttons": buttons,
             "navigation": [
                 "status",
                 "screenshot",
