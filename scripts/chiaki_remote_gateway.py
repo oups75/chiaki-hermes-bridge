@@ -800,7 +800,12 @@ def capture_scene_state(
             scene_metadata["page"] = args.page
         if getattr(args, "actions", None):
             try:
-                scene_metadata["available_actions"] = json.loads(args.actions)
+                raw_actions = json.loads(args.actions)
+                # Resolve aliases to canonical button names
+                for a in raw_actions:
+                    if isinstance(a, dict) and "button" in a:
+                        a["button"] = BUTTON_ALIASES.get(a["button"], a["button"])
+                scene_metadata["available_actions"] = raw_actions
             except (json.JSONDecodeError, TypeError):
                 pass
         learned = store.add_scene(label, embedding, scene_metadata) if label else None
@@ -1299,6 +1304,24 @@ def command_remember_scene(args: argparse.Namespace) -> int:
     except SceneLearningError as exc:
         json_print({"ok": False, "error": str(exc)})
         return 4
+
+    # Validate --actions buttons against live RemoteController list
+    if getattr(args, "actions", None):
+        live_buttons = fetch_live_buttons(args)
+        try:
+            actions_list = json.loads(args.actions)
+            invalid = [
+                a.get("button") for a in actions_list
+                if isinstance(a, dict) and a.get("button") not in (*live_buttons, "none", "rstick", "lstick")
+                   and BUTTON_ALIASES.get(a.get("button", "")) not in live_buttons
+            ]
+            if invalid:
+                json_print({"ok": False, "error": f"Unknown buttons: {invalid}. Valid: {list(live_buttons)}"})
+                return 1
+        except (json.JSONDecodeError, TypeError) as exc:
+            json_print({"ok": False, "error": f"Invalid --actions JSON: {exc}"})
+            return 1
+
     code, payload = capture_scene_state(args, store, embedder, args.label)
     payload.pop("embedding", None)
     payload.pop("_embedding", None)
@@ -1318,8 +1341,24 @@ def extract_json_object(text: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def action_prompt(goal: str) -> str:
-    buttons = ", ".join(BUTTON_NAMES)
+
+def fetch_live_buttons(args: "argparse.Namespace | None" = None) -> tuple[str, ...]:
+    """Return buttons from live RemoteController replica, falling back to BUTTON_NAMES."""
+    try:
+        url = getattr(args, "remote_url", DEFAULT_REMOTE_URL) if args else DEFAULT_REMOTE_URL
+        name = getattr(args, "remote_name", DEFAULT_REMOTE_NAME) if args else DEFAULT_REMOTE_NAME
+        client = RemoteControllerClient(url, name)
+        client.wait_ready(2000)
+        live = client.replica.property("availavleButtons")
+        if live:
+            return tuple(live)
+    except Exception:
+        pass
+    return BUTTON_NAMES
+
+
+def action_prompt(goal: str, button_names: tuple[str, ...] = BUTTON_NAMES) -> str:
+    buttons = ", ".join(button_names)
     return (
         "Analyze this Chiaki/PlayStation screenshot. Return JSON only. "
         f"Goal: {goal}\n"
@@ -1333,8 +1372,8 @@ def action_prompt(goal: str) -> str:
     )
 
 
-def action_menu_prompt() -> str:
-    buttons = ", ".join(BUTTON_NAMES)
+def action_menu_prompt(button_names: tuple[str, ...] = BUTTON_NAMES) -> str:
+    buttons = ", ".join(button_names)
     return (
         "Analyze this Chiaki/PlayStation screenshot. Return JSON only. "
         f"Allowed button values: {buttons}.\n"
@@ -1351,7 +1390,7 @@ def action_menu_prompt() -> str:
 
 
 def call_action_advisor(args: argparse.Namespace, screenshot_path: Path, goal: str) -> dict:
-    prompt = action_prompt(goal)
+    prompt = action_prompt(goal, fetch_live_buttons(args))
     command = [
         args.codex_bin,
         "exec",
@@ -1392,7 +1431,7 @@ def call_action_menu_advisor(args: argparse.Namespace, screenshot_path: Path) ->
     result = subprocess.run(
         command,
         check=False,
-        input=action_menu_prompt(),
+        input=action_menu_prompt(fetch_live_buttons(args)),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -1449,7 +1488,7 @@ def command_suggest(args: argparse.Namespace) -> int:
                 "error": "model analysis failed",
                 "detail": str(exc),
                 "screenshot": screenshot_payload,
-                "prompt": action_prompt(args.goal),
+                "prompt": action_prompt(args.goal, fetch_live_buttons(args)),
             }
         )
         return 4
