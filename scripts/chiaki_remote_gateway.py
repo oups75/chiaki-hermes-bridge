@@ -19,6 +19,7 @@ from scene_learning import (
     TorchvisionEmbedder,
     TorchvisionExporter,
     cosine,
+    slugify,
     update_timing,
 )
 
@@ -802,6 +803,83 @@ def capture_scene_state(
             path.unlink(missing_ok=True)
 
 
+
+def save_classification_record(
+    learning_root: Path,
+    namespace: str,
+    screenshot_path: Path | None,
+    classification: dict,
+    store: "LearningStore | None" = None,
+) -> dict:
+    """Persist screenshot + sidecar JSON and update the shared index.
+
+    Reads last action from the namespace store (set by press command) so
+    the record includes what button/stick was used to arrive at this screen.
+
+    Returns a dict with relative paths added to it:
+      screenshot_saved, classification_saved
+    """
+    import shutil
+
+    ts = time.strftime("%Y-%m-%dT%H-%M-%SZ", time.gmtime())
+    label = slugify(classification.get("label") or "unknown")
+    base_name = f"{ts}-{label}"
+
+    shots_dir = learning_root / "screenshots" / namespace
+    shots_dir.mkdir(parents=True, exist_ok=True)
+
+    png_path = shots_dir / f"{base_name}.png"
+    json_path = shots_dir / f"{base_name}.json"
+
+    if screenshot_path and screenshot_path.exists():
+        shutil.copy2(screenshot_path, png_path)
+
+    png_rel = str(png_path.relative_to(learning_root))
+    json_rel = str(json_path.relative_to(learning_root))
+
+    last_action = store.read_last_action() if store else None
+    action = None
+    if last_action:
+        action = {
+            "button": last_action.get("button"),
+            "type": last_action.get("type", "button"),
+        }
+
+    saved_at = ts[:4] + "-" + ts[5:7] + "-" + ts[8:10] + "T" + ts[11:13] + ":" + ts[14:16] + ":" + ts[17:19] + "Z"
+
+    sidecar = {k: v for k, v in classification.items() if k not in ("_embedding", "embedding")}
+    sidecar["action"] = action
+    sidecar["screenshot"] = png_rel
+    sidecar["classification_file"] = json_rel
+    sidecar["namespace"] = namespace
+    sidecar["saved_at"] = saved_at
+
+    json_path.write_text(json.dumps(sidecar, indent=2, ensure_ascii=False))
+
+    index_path = learning_root / "classifications.json"
+    try:
+        index = json.loads(index_path.read_text()) if index_path.exists() else []
+    except (json.JSONDecodeError, OSError):
+        index = []
+
+    entry = {
+        "saved_at": saved_at,
+        "namespace": namespace,
+        "page": classification.get("page"),
+        "label": classification.get("label"),
+        "matched": classification.get("matched", False),
+        "score": classification.get("local_score") or (classification.get("match") or {}).get("score"),
+        "method": classification.get("method"),
+        "action": action,
+        "screenshot": png_rel,
+        "classification_file": json_rel,
+    }
+    index.append(entry)
+    index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False))
+
+    return {"screenshot_saved": png_rel, "classification_saved": json_rel, "action": action}
+
+
 def command_scene(args: argparse.Namespace) -> int:
     store = LearningStore(args.learning_root, namespace=args.namespace)
     try:
@@ -809,9 +887,14 @@ def command_scene(args: argparse.Namespace) -> int:
     except SceneLearningError as exc:
         json_print({"ok": False, "error": str(exc)})
         return 4
+    args.keep_screenshot = True
     code, payload = capture_scene_state(args, store, embedder)
+    screenshot_path = Path(getattr(args, "output", "/tmp/chiaki-screenshot.png"))
     payload.pop("embedding", None)
+    saved = save_classification_record(args.learning_root, args.namespace, screenshot_path, payload, store)
     payload.pop("_embedding", None)
+    payload.update(saved)
+    screenshot_path.unlink(missing_ok=True)
     json_print(payload)
     return code
 
@@ -825,6 +908,7 @@ def command_classify(args: argparse.Namespace) -> int:
         json_print({"ok": False, "error": str(exc)})
         return 4
 
+    args.keep_screenshot = True
     code, screenshot_payload = capture_screenshot(args)
     if code != 0:
         json_print({"ok": False, "error": "screenshot failed", "screenshot": screenshot_payload})
@@ -875,6 +959,8 @@ def command_classify(args: argparse.Namespace) -> int:
     if getattr(args, "include_embedding", False):
         result["embedding"] = embedding
 
+    saved = save_classification_record(args.learning_root, args.namespace, path if path.exists() else None, result, store)
+    result.update(saved)
     json_print(result)
     return 0 if result["ok"] else 4
 
