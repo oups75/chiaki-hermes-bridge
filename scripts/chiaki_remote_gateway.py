@@ -765,10 +765,25 @@ def capture_scene_state(
             except SceneLearningError:
                 deepinfra_classification = None
 
-        learned = store.add_scene(label, embedding, {"source": screenshot_payload["source"]}) if label else None
+        scene_metadata: dict = {"source": screenshot_payload["source"]}
+        if getattr(args, "page", None):
+            scene_metadata["page"] = args.page
+        if getattr(args, "actions", None):
+            try:
+                scene_metadata["available_actions"] = json.loads(args.actions)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        learned = store.add_scene(label, embedding, scene_metadata) if label else None
+
+        matched_meta = (match.get("scene") or {}).get("metadata", {}) if match["matched"] else {}
+        page = matched_meta.get("page") or (match.get("scene") or {}).get("label") or "unknown"
+        available_actions = matched_meta.get("available_actions")
+
         return 0, {
             "ok": True,
             "source": screenshot_payload["source"],
+            "page": page if match["matched"] else "unknown",
+            "available_actions": available_actions,
             "match": match,
             "deepinfra_classification": deepinfra_classification,
             "learned_scene": {
@@ -833,6 +848,9 @@ def command_classify(args: argparse.Namespace) -> int:
             result["matched"] = True
             result["label"] = match["scene"]["label"]
             result["method"] = "local"
+            meta = match["scene"].get("metadata", {})
+            result["page"] = meta.get("page") or match["scene"]["label"]
+            result["available_actions"] = meta.get("available_actions")
         else:
             # DeepInfra fallback
             try:
@@ -1698,6 +1716,8 @@ def build_parser() -> argparse.ArgumentParser:
     remember_scene = subparsers.add_parser("remember-scene")
     add_scene_args(remember_scene)
     remember_scene.add_argument("label")
+    remember_scene.add_argument("--page", default=None, help="Human-readable page name stored in scene metadata")
+    remember_scene.add_argument("--actions", default=None, help='JSON array of available actions: [{"name":..., "button":..., "description":...}]')
 
     suggest = subparsers.add_parser("suggest")
     add_screenshot_args(suggest)
