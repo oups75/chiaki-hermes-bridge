@@ -26,9 +26,7 @@ from scene_learning import (
 DEFAULT_CHIAKI_WRAPPER = Path(
     "/home/soloway/.hermes/profiles/ps-main/bin/chiaki-launcher"
 )
-DEFAULT_PROCESS_PATTERN = (
-    "/run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/chiaki-ng/build/gui/chiaki"
-)
+DEFAULT_PROCESS_PATTERN = r"(?:ps/chiaki/bin|chiaki-ng/build[^/]*/gui)/chiaki$"
 DEFAULT_LOCAL_REMOTE_URL = "local:chiaki-current-session"
 DEFAULT_REMOTE_URL = os.environ.get("CHIAKI_REMOTE_CONTROLLER_URL", "auto")
 DEFAULT_REMOTE_NAME = "RemoteController"
@@ -297,19 +295,19 @@ class RemoteControllerClient:
 
         sent: list[str] = []
         loop = QEventLoop()
-        triggered = [False]
+        saw_start: list[bool] = [False]
 
         def on_button_changed(btn):
-            if not triggered[0]:
-                return
-            if btn == "":
+            if btn == button_name:
+                saw_start[0] = True
+            elif btn == "" and saw_start[0]:
                 sent.append(button_name)
                 loop.quit()
 
-        timeout_ms = max(1000, int((interval_ms or 120) + 800))
+        # Timeout: press_interval + round-trips + generous slack
+        timeout_ms = max(2000, int((interval_ms or 120) + 1500))
         try:
             self.replica.buttonChanged.connect(on_button_changed)
-            triggered[0] = True
             self.replica.setProperty("button", button_name)
             QTimer.singleShot(timeout_ms, loop.quit)
             loop.exec()

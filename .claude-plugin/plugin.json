@@ -1,0 +1,18 @@
+{
+  "name": "chiaki-bridge",
+  "description": "Hermes/Claude Code bridge for PlayStation control via Chiaki Qt Remote Objects. Covers controller input, screenshot capture, scene learning, MCP server, and session lifecycle.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Oleg Soloway"
+  },
+  "repository": "https://github.com/oups75/chiaki-hermes-bridge",
+  "keywords": [
+    "chiaki",
+    "playstation",
+    "ps5",
+    "remote-controller",
+    "qt-remote-objects",
+    "hermes",
+    "mcp"
+  ]
+}
