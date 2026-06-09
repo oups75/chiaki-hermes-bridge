@@ -425,6 +425,45 @@ class RemoteControllerClient:
 
         return result[0] if result else b""
 
+    def record_task(self, name: str, duration_ms: int) -> list[dict]:
+        """Drive the RemoteController task-recorder: arm recording, collect
+        recordedEventCaptured events for duration_ms, then stop."""
+        events: list[dict] = []
+        loop = QEventLoop()
+
+        def on_event(ev):
+            try:
+                data = dict(ev)
+            except Exception:
+                data = {"raw": ev}
+            shot = data.get("screenshot")
+            if isinstance(shot, QByteArray):
+                data["screenshot"] = bytes(shot)
+            events.append(data)
+
+        self.replica.recordedEventCaptured.connect(on_event)
+        try:
+            QMetaObject.invokeMethod(
+                self.replica,
+                "startTaskRecording",
+                Qt.ConnectionType.QueuedConnection,
+                QGenericArgument("QString", name),
+            )
+            QTimer.singleShot(max(0, duration_ms), loop.quit)
+            loop.exec()
+        finally:
+            QMetaObject.invokeMethod(
+                self.replica,
+                "stopTaskRecording",
+                Qt.ConnectionType.QueuedConnection,
+            )
+            self.app.processEvents()
+            try:
+                self.replica.recordedEventCaptured.disconnect(on_event)
+            except Exception:
+                pass
+        return events
+
     def send(self, button_name: str, interval_ms: int | None = None) -> str:
         button_name = BUTTON_ALIASES.get(button_name, button_name)
         if interval_ms is not None:
@@ -1802,6 +1841,46 @@ def command_press(args: argparse.Namespace) -> int:
     return 0 if ok else 2
 
 
+def command_record_task(args: argparse.Namespace) -> int:
+    if should_launch_chiaki(args):
+        launch_chiaki(args.chiaki_wrapper, args.process_pattern)
+    client = RemoteControllerClient(args.remote_url, args.remote_name)
+    if not client.wait_ready(args.timeout_ms):
+        json_print({"ok": False, "error": "RemoteController replica did not initialize"})
+        return 1
+
+    events = client.record_task(args.goal, args.duration_ms)
+
+    store = LearningStore(args.learning_root, namespace=args.namespace)
+    task_dir = store.ns_root / "recordings" / slugify(args.goal)
+    frames_dir = task_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    timeline: list[dict] = []
+    frame_count = 0
+    for index, event in enumerate(events):
+        shot = event.pop("screenshot", None)
+        if shot:
+            frame_path = frames_dir / f"{index:05d}.png"
+            frame_path.write_bytes(shot)
+            event["frame"] = str(frame_path.relative_to(task_dir))
+            frame_count += 1
+        timeline.append(event)
+
+    timeline_path = task_dir / "timeline.json"
+    timeline_path.write_text(json.dumps({"goal": args.goal, "events": timeline}, indent=2))
+    json_print(
+        {
+            "ok": True,
+            "goal": args.goal,
+            "event_count": len(timeline),
+            "frame_count": frame_count,
+            "timeline": str(timeline_path),
+        }
+    )
+    return 0
+
+
 def current_scene_actions(args: argparse.Namespace) -> tuple[int, dict]:
     store = LearningStore(args.learning_root, namespace=args.namespace)
     try:
@@ -2055,6 +2134,13 @@ def build_parser() -> argparse.ArgumentParser:
     press.add_argument("--interval-ms", type=int)
     press.add_argument("button")
 
+    record_task_cmd = subparsers.add_parser("record-task")
+    add_scene_args(record_task_cmd)
+    record_task_cmd.add_argument("goal")
+    record_task_cmd.add_argument(
+        "--duration-ms", type=int, default=15000,
+        help="Demonstration capture window in milliseconds.")
+
     classify = subparsers.add_parser("classify")
     add_scene_args(classify)
     classify.add_argument("--approve", action="store_true", help="Prompt user to approve or correct classification before saving")
@@ -2147,6 +2233,8 @@ def main() -> int:
         return command_feedback(args)
     if args.command == "press":
         return command_press(args)
+    if args.command == "record-task":
+        return command_record_task(args)
     if args.command == "classify":
         return command_classify(args)
     if args.command == "background-learn":
