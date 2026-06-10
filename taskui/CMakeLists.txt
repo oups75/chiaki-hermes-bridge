@@ -24,12 +24,20 @@ qt_add_executable(chiaki-taskui
 qt_add_qml_module(chiaki-taskui
     URI ChiakiTaskUi
     VERSION 1.0
+    # Embed at :/qt/qml so the engine's default import path resolves the module
+    # in deployed binaries too (build trees also work via the appdir path).
+    RESOURCE_PREFIX /qt/qml
     QML_FILES
         qml/Main.qml
         qml/StepEditor.qml
 )
 target_link_libraries(chiaki-taskui
     PRIVATE soloway-qt-tasktree Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Network)
+
+# Deployment (prod tree): binary + launcher; the tasktree lib installs its own
+# lib/qml via the vendored subproject's install rules.
+install(TARGETS chiaki-taskui RUNTIME DESTINATION bin)
+install(PROGRAMS chiaki-taskui.sh DESTINATION bin)
 
 # Headless functional test of the bridge (import/edit/export round-trip).
 find_package(Qt6 QUIET COMPONENTS Test)
