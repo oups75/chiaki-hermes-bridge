@@ -443,20 +443,16 @@ class RemoteControllerClient:
 
         self.replica.recordedEventCaptured.connect(on_event)
         try:
-            QMetaObject.invokeMethod(
-                self.replica,
-                "startTaskRecording",
-                Qt.ConnectionType.QueuedConnection,
-                QGenericArgument("QString", name),
-            )
+            # Dynamic replicas expose invokables as direct callables; the
+            # PySide6 QGenericArgument form is not usable for QString args.
+            self.replica.startTaskRecording(name)
             QTimer.singleShot(max(0, duration_ms), loop.quit)
             loop.exec()
         finally:
-            QMetaObject.invokeMethod(
-                self.replica,
-                "stopTaskRecording",
-                Qt.ConnectionType.QueuedConnection,
-            )
+            try:
+                self.replica.stopTaskRecording()
+            except Exception:
+                pass
             self.app.processEvents()
             try:
                 self.replica.recordedEventCaptured.disconnect(on_event)

@@ -1,7 +1,7 @@
 ---
 name: chiaki-bridge
 description: Use this skill whenever the user asks to launch, verify, control, screenshot, classify, learn scenes, identify cards, or troubleshoot PlayStation/PS5 games through Chiaki and Hermes, especially NHL26 and HUT workflows. Covers the current RemoteController Qt Remote Objects gateway, PySide6 helper commands, CLIP scene/card recognition, per-game namespaces, NHL26/HUT learned navigation, startup/profile pitfalls, and legacy Hermes bridge failures.
-compatibility: Requires Python 3, PySide6 with QtRemoteObjects, and a Chiaki build that exposes `RemoteController` at `local:chiaki-current-session`. Scene learning requires `torch`, `transformers`, Pillow, and `openai/clip-vit-base-patch32`.
+compatibility: Requires Python 3, PySide6 with QtRemoteObjects, and a Chiaki build that exposes `RemoteController` at `local:chiaki-current-session`. Scene learning requires `torch`, `transformers`, Pillow, and `openai/clip-vit-large-patch14` by default.
 ---
 
 # Chiaki Bridge Setup
@@ -36,21 +36,32 @@ Current control path:
 - Optional LAN URL: `tcp://0.0.0.0:15432`
 - Wrapper: `/home/soloway/.hermes/profiles/ps-main/bin/chiaki-launcher`
 - Chiaki binary: `/run/media/soloway/workspace/prod/games/ps/chiaki/bin/chiaki`
-- Gateway script: `/home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py`
+- Bridge root: `/run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge`
+- Gateway script: `/run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py`
+- MCP server: `/run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_mcp_server.py`
 - Learning root: `/home/soloway/.local/share/chiaki-remote-gateway/learning/`
 - HUT card source: `/run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/hutbuilder/output/`
 
 Always prefix host-side helper commands with `HOME=/home/soloway` to avoid Hermes profile site-package contamination.
+
+Use the Hermes `ps-main` profile as the control surface. Direct gateway commands are allowed for bridge diagnostics and script-level verification only; routine PlayStation control should run through Hermes with the `chiaki-bridge` skill loaded from the production bridge path.
+
+Learning advisor model:
+
+- Use the current Hermes `ps-main` model/provider as the advisor model.
+- Do not hard-code a model in the skill; if the user switches `ps-main` to a Codex model, that Codex model becomes the advisor.
+- The advisor proposes state labels, action hypotheses, route candidates, and training metadata from screenshots.
+- The advisor does not override safety rules: unknown or conflicting next actions still require user confirmation before pressing buttons.
 
 ## Routine Commands
 
 Run from any directory:
 
 ```bash
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py status
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py wait
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py screenshot --output /tmp/chiaki-current.png
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py press cross
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py status
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py wait
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py screenshot --output /tmp/chiaki-current.png
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py press cross
 ```
 
 All gateway commands accept:
@@ -123,6 +134,8 @@ Scene metadata should include:
 - `active_element`
 - `available_actions`
 - `game` for game-specific scenes, e.g. `nhl26`
+- `permanent_regions` for stable UI geometry, e.g. toolbar, title, status row, page number, selected focus box
+- `analysis_lag_ms` from screenshot capture time to detector/model analysis time
 - optional `card_id`
 - optional `player_name`
 - optional `card_type`
@@ -132,11 +145,120 @@ Unknown scene policy:
 - User is the primary adviser.
 - Unknown scene means stop and ask user for step-by-step directives.
 - Never guess action sequences.
-- Never use a model as fallback adviser for unknown scenes.
+- The current Hermes model may summarize evidence and propose labels/actions, but it must mark them unconfirmed and ask the user before pressing or saving.
 - First-time classifications require explicit user confirmation before saving.
 - Remember scenes only after confirmation.
 
 NHL/HUT card identification should focus on card ID and player name before card category.
+
+## Task State Screenshot Learning
+
+During task execution, every screenshot is training data, including frames between the user's task request and the final action result.
+
+For each captured frame, record:
+
+- task name
+- step index
+- namespace, usually `nhl26`
+- `captured_at`
+- `analyzed_at`
+- `analysis_lag_ms`
+- action before or after the frame, if any
+- result state: `pending`, `ok`, or `ko`
+- detected permanent regions
+- advisor model/provider from current Hermes `ps-main` config
+- advisor hypothesis, if used
+
+Keep `analysis_lag_ms` as close to zero as practical. Prefer the fastest reliable detector for action gating:
+
+1. Permanent-region/geometry detector
+2. Cheap OCR for title, status, and page number
+3. Local scene embedding
+4. Full CLIP/OCR classification
+
+Drop stale frames for live decisions during fast transitions, but keep them as training samples with lag metadata.
+
+Use the current Hermes model as learning advisor after fast detectors run. Advisor output should include:
+
+- state hypothesis
+- visible action prompts
+- next safe edge candidates
+- confidence and uncertainty
+- whether user confirmation is required
+- ok/ko training summary after the task result
+
+The advisor should prefer evidence from fresh screenshots, YOLO permanent regions, OCR prompts, and local scene matches. If advisor output conflicts with visible prompts or graph preconditions, ask the user.
+
+## YOLO Permanent Region Training
+
+Use stable screen regions as YOLO training targets when they identify page or state:
+
+- top toolbar
+- page title
+- status strip
+- page number
+- selected row/card focus box
+- modal/dialog title
+- loading indicator
+- disabled or enabled action prompt
+
+Dynamic content should not overwrite permanent-region labels. Example: an auction page may have the same toolbar and page number while card tiles are still loading. Label both:
+
+- permanent page identity regions
+- dynamic content readiness regions
+
+Use YOLO detections for fast state gating before heavier models. Example: if page number changes, page transition happened; if card grid readiness box is absent, wait before treating the page as loaded.
+
+When the user marks a task result `ok`, promote all region labels and state transitions as positive training data. When the result is `ko`, keep the full sequence as negative data for recovery and next-cycle training.
+
+## Game State Graph Learning
+
+Treat each game page as a state in a directed graph. Treat each confirmed button press, wait, page load, or menu transition as an edge from one state to another.
+
+State records should include:
+
+- namespace and game, e.g. `nhl26`
+- page label
+- permanent region detections
+- dynamic readiness detections
+- selected element or focus location
+- available actions shown on screen
+- screenshot references
+- confidence score
+
+Edge records should include:
+
+- source state
+- target state, when known
+- action or wait condition
+- held buttons or modifier state, if any
+- press/release timing for multi-key actions
+- required preconditions
+- observed delay range
+- intermediate screenshots
+- result: `pending`, `ok`, `ko`, or `recovered`
+
+Learn recursive, linear, branching, and parallel task paths as graph routes, not only flat button lists. Use the graph to choose the next safe action only when the current state is freshly detected and matches the route preconditions.
+
+Some task edges are multi-key or held-modifier interactions. Represent these as explicit action phases, not one flat button name:
+
+1. press and hold modifier, e.g. `l2`
+2. navigate while held, e.g. stick scroll or d-pad movement
+3. detect selected element/focus change
+4. release modifier
+5. confirm resulting activation or state transition
+
+Held-button state changes available actions. Example: holding `l2` while scrolling a menu can select a different element or mode than scrolling without `l2`. Store the held state in the graph edge preconditions and in every screenshot captured during the chord.
+
+Most game pages show available actions in permanent screen positions, often near bottom or side toolbars. Detect and store these action-prompt regions as first-class permanent regions:
+
+- button glyph or text, e.g. `X SELECT`, `O BACK`, `L2 FILTER`, `R1 NEXT`
+- region bounding box
+- page/state where prompt appears
+- whether prompt changes under held modifiers
+- whether prompt is enabled, disabled, hidden, or loading
+
+Use visible action prompts to constrain the next graph edge. If the needed action for the next task step is not visible, not detected, or conflicts with current state, stop and ask the user before pressing.
 
 ## PlayStation/Game CLIP Workflow
 
@@ -147,20 +269,20 @@ For any PlayStation/game context:
 1. Ensure the stream is ready:
 
 ```bash
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py wait-session
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py wait-session
 ```
 
 2. Capture and match the scene in the right namespace:
 
 ```bash
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace ps scene
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace nhl26 scene
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py --namespace ps scene
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py --namespace nhl26 scene
 ```
 
-3. Use `classify` only when local scene match is missing or low-confidence. It tries local CLIP embeddings first and may fall back to DeepInfra CLIP using learned scene labels as candidates:
+3. Use `classify` only when local scene match is missing or low-confidence. It uses local CLIP embeddings and OCR only; there is no remote model fallback:
 
 ```bash
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace nhl26 classify --keep-screenshot
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py --namespace nhl26 classify --keep-screenshot
 ```
 
 4. If result is unknown, ask the user what the visible screen is before pressing buttons or saving a route.
@@ -168,7 +290,7 @@ HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-
 5. After user confirms a label, save it with a game-specific name:
 
 ```bash
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace nhl26 remember-scene "nhl26 hut auction search results"
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py --namespace nhl26 remember-scene "nhl26 hut auction search results"
 ```
 
 Use labels that encode game + mode + page + active element when possible, for example:
@@ -186,7 +308,7 @@ Never learn vague labels like `menu`, `screen1`, or `unknown`.
 For NHL26 card workflows, seed CLIP with HUT builder card images before relying on screenshots:
 
 ```bash
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py --namespace nhl26 card-model-import --hutbuilder-output /run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/hutbuilder/output/
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py --namespace nhl26 card-model-import --hutbuilder-output /run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/hutbuilder/output/
 ```
 
 The import stores labels as `card-<card_id>` with metadata:
@@ -208,12 +330,18 @@ Use `feedback good|bad` after user confirms whether a match was correct. Good fe
 
 ## CLIP Embedder
 
-Scene embeddings use `openai/clip-vit-base-patch32` through Hugging Face `transformers`.
+Scene embeddings use `openai/clip-vit-large-patch14` through Hugging Face `transformers` by default. Override with `CHIAKI_VISION_MODEL` only after running `scripts/evaluate_vision_models.py` on current learning screenshots.
+
+Current local evaluation on 55 saved Chiaki screenshots ranked:
+
+1. `openai/clip-vit-large-patch14` — top-1 `0.8261`
+2. `google/siglip-base-patch16-224` — top-1 `0.7826`
+3. `openai/clip-vit-base-patch32` — top-1 `0.7391`
 
 Dependency check:
 
 ```bash
-HOME=/home/soloway python3 -c "from transformers import CLIPModel, CLIPProcessor; model = CLIPModel.from_pretrained('openai/clip-vit-base-patch32'); print('CLIP OK dim:', model.config.projection_dim)"
+HOME=/home/soloway python3 -c "from transformers import CLIPModel, CLIPProcessor; model = CLIPModel.from_pretrained('openai/clip-vit-large-patch14'); print('CLIP OK dim:', model.config.projection_dim)"
 ```
 
 Important pitfall:
@@ -227,7 +355,8 @@ Important pitfall:
 
 Embedding dimension:
 
-- CLIP ViT-B/32 produces 512-dimensional normalized embeddings.
+- CLIP ViT-L/14 produces 768-dimensional normalized embeddings.
+- CLIP ViT-B/32 produces 512-dimensional normalized embeddings and is now legacy for this bridge.
 - Old ResNet50 embeddings were 2048-dimensional and are incompatible. Re-learn old scenes after switching stores/models.
 
 See nested reference:
@@ -244,7 +373,7 @@ Expected scheduled jobs:
 
 Keep cron prompts pointing at:
 
-`/home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py`
+`/run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py`
 
 Keep cron skill name as:
 
@@ -255,7 +384,7 @@ Keep cron skill name as:
 Preferred routine (on-demand, single call):
 
 ```bash
-HOME=/home/soloway python3 /home/soloway/.hermes/profiles/ps-main/skills/chiaki-bridge-setup/scripts/chiaki_remote_gateway.py wait-session
+HOME=/home/soloway python3 /run/media/soloway/workspace/prod/games/ps/chiaki/hermes-bridge/scripts/chiaki_remote_gateway.py wait-session
 ```
 
 Or via MCP tool: `chiaki_wait_session`.
