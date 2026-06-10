@@ -148,7 +148,9 @@ QString ChiakiTaskBridge::addTaskFromJson(TaskTreeModel *model, const QString &k
         {QStringLiteral("start_scene"), task.value(QStringLiteral("start_scene")).toString()},
         {QStringLiteral("end_scene"), task.value(QStringLiteral("end_scene")).toString()},
         {QStringLiteral("source"), task.value(QStringLiteral("source")).toString(QStringLiteral("learned"))},
-        {QStringLiteral("approved"), task.value(QStringLiteral("approved")).toBool(false)}};
+        {QStringLiteral("approved"), task.value(QStringLiteral("approved")).toBool(false)},
+        {QStringLiteral("expected_start"), task.value(QStringLiteral("expected_start")).toObject().toVariantMap()},
+        {QStringLiteral("expected_end"), task.value(QStringLiteral("expected_end")).toObject().toVariantMap()}};
     const QString gid = model->addTask({}, goal, kGroup, groupPayload);
 
     const QJsonArray steps = task.value(QStringLiteral("steps")).toArray();
@@ -199,6 +201,27 @@ int ChiakiTaskBridge::mergeJson(TaskTreeModel *model, const QString &ns)
     return added;
 }
 
+void ChiakiTaskBridge::captureExpected(const QString &ns)
+{
+    const QString dir = QStringLiteral("%1/screenshots/%2").arg(m_root, ns);
+    QDir().mkpath(dir);
+    const QString png = QStringLiteral("%1/expected-%2.png")
+                            .arg(dir).arg(QDateTime::currentSecsSinceEpoch());
+
+    // Capture the live screen, then classify it for the matcher scene label.
+    runGateway({QStringLiteral("screenshot"), QStringLiteral("--output"), png}, ns,
+               [this, png, ns](const QString &, bool ok) {
+        if (!ok)
+            emit errorOccurred(QStringLiteral("screenshot failed (no live session?)"));
+        runGateway({QStringLiteral("classify")}, ns, [this, png](const QString &out, bool) {
+            static const QRegularExpression re(
+                QStringLiteral("page[\"']?\\s*[:=]\\s*[\"']([^\"']+)[\"']"));
+            const QRegularExpressionMatch m = re.match(out);
+            emit expectedCaptured(png, m.hasMatch() ? m.captured(1).trimmed() : QString());
+        });
+    });
+}
+
 void ChiakiTaskBridge::classify(const QString &ns)
 {
     runGateway({QStringLiteral("classify")}, ns, [this](const QString &out, bool) {
@@ -239,6 +262,8 @@ bool ChiakiTaskBridge::exportJson(TaskTreeModel *model, const QString &ns)
             {QStringLiteral("end_scene"), t.payload.value(QStringLiteral("end_scene")).toString()},
             {QStringLiteral("source"), t.payload.value(QStringLiteral("source"), QStringLiteral("user")).toString()},
             {QStringLiteral("approved"), t.payload.value(QStringLiteral("approved"), true).toBool()},
+            {QStringLiteral("expected_start"), QJsonObject::fromVariantMap(t.payload.value(QStringLiteral("expected_start")).toMap())},
+            {QStringLiteral("expected_end"), QJsonObject::fromVariantMap(t.payload.value(QStringLiteral("expected_end")).toMap())},
             {QStringLiteral("steps"), steps}});
     }
 

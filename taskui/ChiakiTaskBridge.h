@@ -71,6 +71,11 @@ public:
     // with the detected page (for dynamic-mode filtering).
     Q_INVOKABLE void classify(const QString &ns);
 
+    // Capture an expected-state screenshot of the live screen and classify it.
+    // Emits expectedCaptured(screenshotPath, sceneLabel). The scene label is what
+    // a verifier matches against (classifier-based, tolerant of dynamic content).
+    Q_INVOKABLE void captureExpected(const QString &ns);
+
     // Mirror of the gateway slugify (lowercase, non-alnum -> '-').
     Q_INVOKABLE static QString slugify(const QString &text);
 
@@ -82,6 +87,7 @@ signals:
     void errorOccurred(const QString &message);
     void contextChanged(const QString &page);
     void tasksMerged(int added);
+    void expectedCaptured(const QString &screenshot, const QString &scene);
     void chiakiRunningChanged();
     // replicaAvailable, chiakiRunning, human-readable message.
     void connectionStatus(bool replicaAvailable, bool chiakiRunning, const QString &message);

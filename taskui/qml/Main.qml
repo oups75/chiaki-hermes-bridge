@@ -109,7 +109,7 @@ ApplicationWindow {
         }
     }
 
-    StepEditor { id: editor; model: taskModel }
+    StepEditor { id: editor; model: taskModel; bridge: bridge; ns: win.ns }
 
     // Floating proxy carrying the dragged task id for drag-drop composition.
     Item {

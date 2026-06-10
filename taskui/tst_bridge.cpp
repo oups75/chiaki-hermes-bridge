@@ -64,14 +64,19 @@ private slots:
         QCOMPARE(model.task(gid).payload.value("source").toString(), QStringLiteral("learned"));
         QVERIFY(!model.task(gid).payload.value("approved").toBool());
 
-        // Edit: add a third step + set a precondition scene + approve.
-        model.addTask(gid, QStringLiteral("press circle"), int(TaskTree::Type::Manual),
-                      QVariantMap{{"button", "circle"}, {"type", "button"}});
+        // Edit: add a third step (with an expected state) + precondition + approve.
+        const QString sid = model.addTask(gid, QStringLiteral("press circle"),
+                      int(TaskTree::Type::Manual),
+                      QVariantMap{{"button", "circle"}, {"type", "button"},
+                                  {"expected_state", QVariantMap{{"screenshot", "/s/e.png"},
+                                                                 {"scene", "card revealed"}}}});
         QCOMPARE(model.children(gid).size(), 3);
         QVariantMap gp = model.task(gid).payload;
         gp["start_scene"] = "hut store";
         gp["approved"] = true;
+        gp["expected_start"] = QVariantMap{{"screenshot", "/s/start.png"}, {"scene", "hut store"}};
         model.updateTask(gid, {{"payload", gp}});
+        Q_UNUSED(sid);
 
         // Export and re-read.
         QVERIFY(bridge.exportJson(&model, QStringLiteral("demo")));
@@ -88,6 +93,12 @@ private slots:
         QCOMPARE(task.value("start_scene").toString(), QStringLiteral("hut store"));
         QCOMPARE(task.value("source").toString(), QStringLiteral("learned"));
         QVERIFY(task.value("approved").toBool());
+        // Expected states persisted (task-level + step-level).
+        QCOMPARE(task.value("expected_start").toObject().value("scene").toString(),
+                 QStringLiteral("hut store"));
+        QCOMPARE(task.value("steps").toArray().last().toObject()
+                     .value("expected_state").toObject().value("scene").toString(),
+                 QStringLiteral("card revealed"));
     }
 
     void reimportReplacesContent()
@@ -127,6 +138,25 @@ private slots:
         QCOMPARE(model.rootIds().size(), 2);
         // Merging again adds nothing.
         QCOMPARE(bridge.mergeJson(&model, QStringLiteral("demo3")), 0);
+    }
+
+    void captureExpectedReturnsSceneAndPath()
+    {
+        // Fake gateway: print a page for `classify`, succeed silently otherwise.
+        const QString fake = tmp.path() + "/fake_gw2.py";
+        { QFile f(fake); QVERIFY(f.open(QIODevice::WriteOnly));
+          f.write("import sys\n"
+                  "if 'classify' in sys.argv:\n"
+                  "    print('{\"page\": \"hut store\"}')\n"); }
+
+        ChiakiTaskBridge bridge;
+        bridge.setGatewayScript(fake);
+        bridge.setLearningRoot(tmp.path());
+        QSignalSpy spy(&bridge, &ChiakiTaskBridge::expectedCaptured);
+        bridge.captureExpected(QStringLiteral("demo"));
+        QVERIFY(spy.wait(5000));
+        QCOMPARE(spy.first().at(1).toString(), QStringLiteral("hut store"));
+        QVERIFY(spy.first().at(0).toString().contains(QStringLiteral("/screenshots/demo/expected-")));
     }
 
     void classifyParsesPage()
