@@ -6,6 +6,7 @@
 #include <QJsonArray>
 
 #include "ChiakiTaskBridge.h"
+#include "ChiakiDiscoveryService.h"
 #include "ChiakiProcess.h"
 #include "TaskTreeModel.h"
 #include "TaskTreeHost.h"
@@ -62,6 +63,27 @@ private:
         QVERIFY(f.open(QIODevice::WriteOnly));
         f.write(QJsonDocument(QJsonObject{{"open-pack", task}}).toJson());
     }
+
+    // Deterministic discovery: reports one ready console, records wakeups.
+    class FakeDiscovery : public ChiakiDiscoveryService
+    {
+    public:
+        using ChiakiDiscoveryService::ChiakiDiscoveryService;
+        QString wokenHost;
+        bool discover(int) override
+        {
+            setConsolesForTest({QVariantMap{
+                {"host", "127.0.0.1"}, {"state", "ready"}, {"name", "PS5-fake"}}});
+            QMetaObject::invokeMethod(this, [this] { emit finished(1); },
+                                      Qt::QueuedConnection);
+            return true;
+        }
+        bool wakeup(const QString &host, const QString &) override
+        {
+            wokenHost = host;
+            return true;
+        }
+    };
 
 private slots:
     void slugifyMatchesGateway()
@@ -266,14 +288,8 @@ private slots:
 
     void startSessionStreamsWhenReady()
     {
-        // Fake gateway: discover-console reports a ready PS5; fake chiaki
-        // binary accepts the stream invocation. Exercises the full
-        // discover -> launchSession chain (wakeup branch is skipped).
-        const QString fake = tmp.path() + "/fake_gw3.py";
-        { QFile f(fake); QVERIFY(f.open(QIODevice::WriteOnly));
-          f.write("import sys\n"
-                  "if 'discover-console' in sys.argv:\n"
-                  "    print('{\"ok\": true, \"consoles\": [{\"host\": \"127.0.0.1\", \"state\": \"ready\"}]}')\n"); }
+        // Fake discovery reports a ready PS5; fake chiaki binary accepts the
+        // stream invocation. Exercises discover -> launchSession (no wakeup).
         const QString root = tmp.path() + "/chiakiroot3";
         QDir().mkpath(root + "/bin");
         { QFile f(root + "/bin/chiaki"); QVERIFY(f.open(QIODevice::WriteOnly));
@@ -281,8 +297,8 @@ private slots:
           f.setPermissions(f.permissions() | QFileDevice::ExeOwner); }
 
         ChiakiTaskBridge bridge;
-        bridge.setGatewayScript(fake);
         bridge.setChiakiRoot(root);
+        bridge.setDiscoveryService(new FakeDiscovery);
 
         // Needs a registered console in ~/.config/Chiaki/Chiaki.conf for the
         // nickname; skip on machines without one.
@@ -299,6 +315,28 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(bridge.chiakiRunning(), 5000); // stream task up
         QTRY_VERIFY_WITH_TIMEOUT(!bridge.chiakiRunning(), 5000); // fake exits
         Q_UNUSED(running);
+    }
+
+    void discoveryServiceProbesQuietLan()
+    {
+        // Real sockets, no console expected on the test LAN: the probe must
+        // come back cleanly (count >= 0) without hanging or erroring.
+        ChiakiDiscoveryService disco;
+        QSignalSpy done(&disco, &ChiakiDiscoveryService::finished);
+        QSignalSpy errors(&disco, &ChiakiDiscoveryService::errorOccurred);
+        QVERIFY(disco.discover(800));
+        QVERIFY(disco.running());
+        QVERIFY(done.wait(5000));
+        QVERIFY(!disco.running());
+        QCOMPARE(errors.count(), 0);
+        QCOMPARE(done.first().first().toInt(), disco.consoles().size());
+    }
+
+    void discoveryServiceWakeupSends()
+    {
+        // UDP wakeup to loopback: sendto succeeds without any console.
+        ChiakiDiscoveryService disco;
+        QVERIFY(disco.wakeup(QStringLiteral("127.0.0.1"), QStringLiteral("776ad678")));
     }
 
     void classifyParsesPage()

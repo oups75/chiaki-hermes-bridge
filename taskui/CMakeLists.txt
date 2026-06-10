@@ -14,6 +14,19 @@ set(TASKTREE_DIR
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(${TASKTREE_DIR} ${CMAKE_BINARY_DIR}/soloway-qt-tasktree)
 
+# libchiaki (discovery/wakeup) from the chiaki-ng tree this app lives in.
+# Prebuilt static archive; headers from the source tree + generated config.h.
+set(CHIAKI_NG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.."
+    CACHE PATH "Path to the chiaki-ng source tree")
+find_library(CHIAKI_LIB chiaki
+    PATHS "${CHIAKI_NG_DIR}/build/Desktop_Qt_6_11_1-Debug/lib"
+          "${CHIAKI_NG_DIR}/build/lib"
+    NO_DEFAULT_PATH)
+if(NOT CHIAKI_LIB)
+    message(FATAL_ERROR "libchiaki.a not found under ${CHIAKI_NG_DIR}/build*/lib — build chiaki-ng first")
+endif()
+get_filename_component(CHIAKI_LIB_DIR "${CHIAKI_LIB}" DIRECTORY)
+
 # UI module on a static library so the app and the QML test harness share it
 # (a module on the executable is unreachable from a sibling test binary).
 qt_add_library(chiaki-taskui-ui STATIC
@@ -21,6 +34,8 @@ qt_add_library(chiaki-taskui-ui STATIC
     ChiakiTaskBridge.h
     ChiakiProcess.cpp
     ChiakiProcess.h
+    ChiakiDiscoveryService.cpp
+    ChiakiDiscoveryService.h
 )
 qt_add_qml_module(chiaki-taskui-ui
     URI ChiakiTaskUi
@@ -32,9 +47,16 @@ qt_add_qml_module(chiaki-taskui-ui
         qml/Main.qml
         qml/StepEditor.qml
 )
-target_include_directories(chiaki-taskui-ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(chiaki-taskui-ui
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+           "${CHIAKI_NG_DIR}/lib/include"
+           "${CHIAKI_LIB_DIR}/include")
+# libchiaki.a's common/random objects pull jerasure + OpenSSL.
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+find_library(JERASURE_LIB Jerasure REQUIRED)
 target_link_libraries(chiaki-taskui-ui
-    PUBLIC soloway-qt-tasktree Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Network)
+    PUBLIC soloway-qt-tasktree Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Network
+           "${CHIAKI_LIB}" "${JERASURE_LIB}" OpenSSL::Crypto)
 
 qt_add_executable(chiaki-taskui main.cpp)
 target_link_libraries(chiaki-taskui

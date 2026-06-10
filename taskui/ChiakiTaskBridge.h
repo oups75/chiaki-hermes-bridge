@@ -9,6 +9,7 @@
 
 #include "RemoteTaskClient.h"
 
+class ChiakiDiscoveryService;
 class ChiakiProcess;
 class QFileSystemWatcher;
 namespace QtTaskTree { class QTaskTree; }
@@ -98,6 +99,10 @@ public:
     // Mirror of the gateway slugify (lowercase, non-alnum -> '-').
     Q_INVOKABLE static QString slugify(const QString &text);
 
+    // Dependency injection for tests: substitute the discovery service used
+    // by startSession(). The bridge takes ownership.
+    void setDiscoveryService(ChiakiDiscoveryService *service);
+
 signals:
     void configChanged();
     void runningChanged();
@@ -116,6 +121,7 @@ private:
     QString m_gateway;
     QString m_chiakiRoot;
     ChiakiProcess *m_chiaki = nullptr;
+    ChiakiDiscoveryService *m_discovery = nullptr; // native libchiaki discovery
     bool m_extRunning = false; // an externally-started chiaki detected via pgrep
     int m_sessionAttempts = 0; // wakeup retries within startSession()
     QFileSystemWatcher *m_watcher = nullptr;

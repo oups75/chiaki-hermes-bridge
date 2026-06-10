@@ -1,5 +1,6 @@
 #include "ChiakiTaskBridge.h"
 
+#include "ChiakiDiscoveryService.h"
 #include "ChiakiProcess.h"
 #include "RemoteTaskClient.h"
 #include "TaskTreeModel.h" // role enum for replica reads
@@ -554,6 +555,18 @@ ConsoleCreds consoleCreds()
 }
 } // namespace
 
+void ChiakiTaskBridge::setDiscoveryService(ChiakiDiscoveryService *service)
+{
+    if (m_discovery)
+        m_discovery->deleteLater();
+    m_discovery = service;
+    if (m_discovery) {
+        m_discovery->setParent(this);
+        connect(m_discovery, &ChiakiDiscoveryService::errorOccurred,
+                this, &ChiakiTaskBridge::errorOccurred);
+    }
+}
+
 void ChiakiTaskBridge::startSession(const QString &ns)
 {
     // An idle chiaki (GUI without a live stream) would conflict with the CLI
@@ -568,19 +581,26 @@ void ChiakiTaskBridge::startSession(const QString &ns)
         return;
     }
 
-    runGateway({QStringLiteral("discover-console")}, ns, [this, ns, creds](const QString &out, bool) {
-        const QJsonObject o = extractJson(out);
-        const QJsonArray consoles = o.value(QStringLiteral("consoles")).toArray();
+    // Native discovery (libchiaki via ChiakiDiscoveryService): one probe
+    // window, then act on the result.
+    if (!m_discovery)
+        setDiscoveryService(new ChiakiDiscoveryService(this));
+    if (m_discovery->running())
+        return; // probe already in flight; finished() will continue
+
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(m_discovery, &ChiakiDiscoveryService::finished, this,
+                    [this, ns, creds, conn](int count) {
+        disconnect(*conn);
         QString host, state;
-        if (!consoles.isEmpty()) {
-            const QJsonObject c = consoles.first().toObject();
+        if (count > 0) {
+            const QVariantMap c = m_discovery->consoles().first().toMap();
             host = c.value(QStringLiteral("host")).toString();
             state = c.value(QStringLiteral("state")).toString();
-        } else if (const QString cached = o.value(QStringLiteral("cached_host")).toString();
-                   !cached.isEmpty()) {
-            // No discovery reply but we know where the console last lived:
-            // wake it blind and re-probe (state "standby" reuses the retry loop).
-            host = cached;
+        } else if (!m_discovery->cachedHost().isEmpty()) {
+            // No reply but we know where the console last lived: wake it
+            // blind and re-probe (the standby path is the retry loop).
+            host = m_discovery->cachedHost();
             state = QStringLiteral("standby");
             emit runOutput(QStringLiteral("PS5 silent — trying cached console %1").arg(host));
         } else {
@@ -606,13 +626,10 @@ void ChiakiTaskBridge::startSession(const QString &ns)
         ++m_sessionAttempts;
         emit runOutput(QStringLiteral("PS5 %1 in standby — waking (attempt %2/8)")
                            .arg(host).arg(m_sessionAttempts));
-        auto *wake = new ChiakiProcess(this);
-        wake->setChiakiRoot(m_chiakiRoot);
-        wake->setupWakeup(host, creds.registKey);
-        connect(wake, &QProcess::finished, wake, &QObject::deleteLater);
-        wake->start();
+        m_discovery->wakeup(host, creds.registKey);
         QTimer::singleShot(5000, this, [this, ns] { startSession(ns); });
     });
+    m_discovery->discover(3000);
 }
 
 void ChiakiTaskBridge::closeChiaki()
