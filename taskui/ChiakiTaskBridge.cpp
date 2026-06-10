@@ -552,9 +552,11 @@ ConsoleCreds consoleCreds()
 
 void ChiakiTaskBridge::startSession(const QString &ns)
 {
+    // An idle chiaki (GUI without a live stream) would conflict with the CLI
+    // stream window — close it and proceed. Callers gate on a *live* session.
     if (chiakiRunning()) {
-        emit errorOccurred(QStringLiteral("close chiaki before starting a session"));
-        return;
+        qCInfo(lcChiaki) << "startSession: closing idle chiaki first";
+        closeChiaki();
     }
     const ConsoleCreds creds = consoleCreds();
     if (creds.nickname.isEmpty()) {

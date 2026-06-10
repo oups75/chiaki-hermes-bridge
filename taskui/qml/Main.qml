@@ -190,10 +190,12 @@ ApplicationWindow {
                 Label { text: qsTr("Namespace"); Layout.leftMargin: 8 }
                 ComboBox {
                     id: nsCombo
+                    objectName: "nsCombo"
                     Layout.preferredWidth: 140
                     onActivated: settings.lastNamespace = currentText
                 }
                 ToolButton {
+                    objectName: "importBtn"
                     text: qsTr("Import")
                     enabled: remote.connected
                     onClicked: {
@@ -209,6 +211,7 @@ ApplicationWindow {
                     }
                 }
                 ToolButton {
+                    objectName: "exportBtn"
                     text: qsTr("Export JSON")
                     enabled: remote.connected
                     onClicked: win.log(bridge.exportJson(remote, win.ns)
@@ -218,6 +221,7 @@ ApplicationWindow {
                 ToolSeparator {}
                 CheckBox {
                     id: dynamicCheck
+                    objectName: "dynamicCheck"
                     text: qsTr("Dynamic")
                     ToolTip.text: qsTr("Show only tasks runnable from the current screen")
                     ToolTip.visible: hovered
@@ -257,28 +261,35 @@ ApplicationWindow {
                     Label { text: qsTr("Chiaki: %1").arg(win.chiakiStatusMsg); Layout.fillWidth: true }
                     // Task-server (QtRO) link state.
                     Label {
+                        objectName: "serverStateLabel"
                         text: remote.connected ? qsTr("server ✓") : qsTr("server ✗")
                         color: remote.connected ? "#2e7d32" : "#c62828"
                         ToolTip.text: remote.url
                         ToolTip.visible: serverHover.hovered
                         HoverHandler { id: serverHover }
                     }
-                    ToolButton { text: qsTr("Test"); onClicked: { win.log(qsTr("testing connection…")); bridge.testConnection(win.ns) } }
-                    ToolButton { text: qsTr("Connect"); enabled: bridge.chiakiRunning && !win.chiakiConnected
+                    ToolButton { objectName: "testBtn"; text: qsTr("Test")
+                                 onClicked: { win.log(qsTr("testing connection…")); bridge.testConnection(win.ns) } }
+                    ToolButton { objectName: "connectBtn"; text: qsTr("Connect")
+                                 enabled: bridge.chiakiRunning && !win.chiakiConnected
                                  ToolTip.text: qsTr("Wait for the PS stream to come up")
                                  ToolTip.visible: hovered
                                  onClicked: { win.log(qsTr("waiting for PS session…")); bridge.connectSession(win.ns) } }
-                    ToolButton { text: qsTr("Start session"); enabled: !bridge.chiakiRunning
-                                 ToolTip.text: qsTr("Discover the PS5, wake it if needed, stream directly")
+                    ToolButton { objectName: "startSessionBtn"; text: qsTr("Start session")
+                                 enabled: !win.chiakiConnected
+                                 ToolTip.text: qsTr("Discover the PS5, wake it if needed, stream directly (closes an idle chiaki)")
                                  ToolTip.visible: hovered
                                  onClicked: { win.log(qsTr("discovering PS5…")); bridge.startSession(win.ns) } }
-                    ToolButton { text: qsTr("Launch"); enabled: !bridge.chiakiRunning
+                    ToolButton { objectName: "launchBtn"; text: qsTr("Launch")
+                                 enabled: !bridge.chiakiRunning
                                  onClicked: { win.log(qsTr("launching chiaki…")); bridge.launchChiaki() } }
-                    ToolButton { text: qsTr("Restart"); enabled: bridge.chiakiRunning
+                    ToolButton { objectName: "restartBtn"; text: qsTr("Restart")
+                                 enabled: bridge.chiakiRunning
                                  ToolTip.text: qsTr("Close and relaunch chiaki (recovers a dead stream)")
                                  ToolTip.visible: hovered
                                  onClicked: { win.log(qsTr("restarting chiaki…")); bridge.restartChiaki() } }
-                    ToolButton { text: qsTr("Close"); enabled: bridge.chiakiRunning
+                    ToolButton { objectName: "closeBtn"; text: qsTr("Close")
+                                 enabled: bridge.chiakiRunning
                                  onClicked: win.chiakiConnected ? closeConfirm.open() : bridge.closeChiaki() }
                 }
             }
@@ -286,6 +297,7 @@ ApplicationWindow {
             // Dynamic mode: flat list of tasks runnable from the current screen.
             ListView {
                 id: dynList
+                objectName: "dynList"
                 visible: win.dynamicMode
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -332,6 +344,7 @@ ApplicationWindow {
 
             TreeView {
                 id: tree
+                objectName: "tree"
                 visible: !win.dynamicMode
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -467,6 +480,7 @@ ApplicationWindow {
                     anchors.fill: parent
                     TextArea {
                         id: logArea
+                        objectName: "logArea"
                         readOnly: true
                         wrapMode: TextArea.WrapAnywhere
                         placeholderText: qsTr("import a namespace, edit tasks, run on PS5…")

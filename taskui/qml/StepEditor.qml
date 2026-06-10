@@ -160,6 +160,7 @@ Dialog {
         Label { text: dlg.mode === "task" ? qsTr("Goal") : qsTr("Step name") }
         TextField {
             id: nameField
+            objectName: "nameField"
             Layout.fillWidth: true
             placeholderText: dlg.mode === "task" ? qsTr("e.g. open pack") : qsTr("e.g. press cross")
         }
@@ -175,12 +176,14 @@ Dialog {
             Label { text: qsTr("Start scene") }
             TextField {
                 id: startSceneField
+                objectName: "startSceneField"
                 placeholderText: qsTr("page this task runs from (e.g. hut store)")
                 Layout.fillWidth: true
             }
             Label { text: qsTr("End scene") }
             TextField {
                 id: endSceneField
+                objectName: "endSceneField"
                 placeholderText: qsTr("page after it completes (optional)")
                 Layout.fillWidth: true
             }
@@ -188,12 +191,14 @@ Dialog {
 
         // Expected screens (classifier-matched), task start + end.
         ExpectedRow {
+            objectName: "expStart"
             visible: dlg.mode === "task"
             label: qsTr("Expected start")
             value: dlg.startExp
             slot: "start"
         }
         ExpectedRow {
+            objectName: "expEnd"
             visible: dlg.mode === "task"
             label: qsTr("Expected end")
             value: dlg.endExp
@@ -210,18 +215,21 @@ Dialog {
             Label { text: qsTr("Button") }
             ComboBox {
                 id: buttonCombo
+                objectName: "buttonCombo"
                 model: dlg.buttonNames
                 Layout.fillWidth: true
             }
             Label { text: qsTr("Type") }
             ComboBox {
                 id: typeCombo
+                objectName: "typeCombo"
                 model: dlg.stepTypes
                 Layout.fillWidth: true
             }
             Label { text: qsTr("Wait (ms)") }
             SpinBox {
                 id: waitSpin
+                objectName: "waitSpin"
                 from: 0; to: 60000; stepSize: 50
                 editable: true
                 Layout.fillWidth: true
@@ -229,6 +237,7 @@ Dialog {
             Label { text: qsTr("Scene") }
             TextField {
                 id: sceneField
+                objectName: "sceneField"
                 placeholderText: qsTr("expected scene label (optional)")
                 Layout.fillWidth: true
             }
@@ -236,6 +245,7 @@ Dialog {
 
         // Expected screen for this step (e.g. result after the action).
         ExpectedRow {
+            objectName: "expStep"
             visible: dlg.mode === "step"
             label: qsTr("Expected")
             value: dlg.stepExp
