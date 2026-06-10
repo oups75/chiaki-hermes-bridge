@@ -6,10 +6,10 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick Network TaskTree)
 qt_standard_project_setup()
 
-# Consume the Soloway.QtTaskTree module from the monorepo. Override with
-# -DTASKTREE_DIR=<path> if the layout differs. Skip the module's own tests.
+# Consume the Soloway.QtTaskTree module, vendored as a git submodule at
+# taskui/tasktree. Override with -DTASKTREE_DIR=<path> if needed. Skip its tests.
 set(TASKTREE_DIR
-    "/run/media/soloway/workspace/Devel/Projects/soloway/libs/qt/tasktree"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tasktree"
     CACHE PATH "Path to the Soloway.QtTaskTree module source")
 set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(${TASKTREE_DIR} ${CMAKE_BINARY_DIR}/soloway-qt-tasktree)
