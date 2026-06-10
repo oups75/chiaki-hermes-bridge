@@ -117,8 +117,7 @@ void ChiakiTaskBridge::refreshChiakiRunning()
             m_extRunning = ext;
             qCInfo(lcChiaki) << "external chiaki" << (ext ? "detected" : "gone");
             if (!ext && !chiakiRunning())
-                emit connectionStatus(false, false,
-                                      QStringLiteral("chiaki closed (session ended)"));
+                emit connectionStatus(false, false, QStringLiteral("closed"));
             emit chiakiRunningChanged();
         }
     });
@@ -472,7 +471,7 @@ void ChiakiTaskBridge::launchChiaki()
     connect(m_chiaki, &QProcess::finished, this, [this](int code, QProcess::ExitStatus st) {
         qCInfo(lcChiaki) << "chiaki GUI exited, code" << code << st;
         emit connectionStatus(false, chiakiRunning(),
-                              QStringLiteral("chiaki exited (code %1)").arg(code));
+                              QStringLiteral("exited (code %1)").arg(code));
         emit chiakiRunningChanged();
     });
     qCInfo(lcChiaki) << "launching chiaki GUI from" << m_chiakiRoot;
@@ -519,8 +518,7 @@ void ChiakiTaskBridge::launchSession(const QString &nickname, const QString &hos
         if (m_sessionTree == tree)
             m_sessionTree = nullptr;
         tree->deleteLater();
-        emit connectionStatus(false, chiakiRunning(),
-                              QStringLiteral("stream session ended"));
+        emit connectionStatus(false, chiakiRunning(), QStringLiteral("stream ended"));
         emit chiakiRunningChanged();
     });
     qCInfo(lcChiaki) << "starting CLI stream" << nickname << host << extraArgs;
@@ -661,7 +659,7 @@ void ChiakiTaskBridge::connectSession(const QString &ns)
         const bool crun = o.value(QStringLiteral("replica_available")).toBool();
         if (crun && !m_extRunning) { m_extRunning = true; emit chiakiRunningChanged(); }
         const QString msg = sess ? QStringLiteral("session connected")
-                                 : QStringLiteral("no PS session (start the stream on chiaki)");
+                                 : QStringLiteral("no session");
         emit connectionStatus(sess, crun, msg);
     });
 }
@@ -677,9 +675,10 @@ void ChiakiTaskBridge::testConnection(const QString &ns)
         const bool sess = o.value(QStringLiteral("session_connected")).toBool();
         const bool crun = o.value(QStringLiteral("replica_available")).toBool();
         if (crun != m_extRunning) { m_extRunning = crun; emit chiakiRunningChanged(); }
+        // Plain state, no embedded advice — the UI decides what to offer.
         QString msg = sess ? QStringLiteral("session connected")
-                    : crun ? QStringLiteral("chiaki running, no live session — restart the stream")
-                           : QStringLiteral("chiaki not running");
+                    : crun ? QStringLiteral("running, no session")
+                           : QStringLiteral("not running");
         qCInfo(lcChiaki) << "testConnection: session" << sess << "chiaki" << crun;
         emit connectionStatus(sess, crun, msg);
     });

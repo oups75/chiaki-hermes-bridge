@@ -64,9 +64,14 @@ ApplicationWindow {
         availableList = out
     }
 
-    // Mirror the on-screen run log into the Qt logging system.
+    // Mirror the on-screen run log into the Qt logging system; collapse
+    // immediate repeats so button mashing doesn't flood the log.
+    property string _lastLogLine: ""
     function log(line) {
         console.info(uiLog, line)
+        if (line === _lastLogLine)
+            return
+        _lastLogLine = line
         logArea.append(line)
     }
     function approve(id) {
@@ -129,8 +134,10 @@ ApplicationWindow {
         }
         function onConnectionStatus(replica, crun, msg) {
             win.chiakiConnected = replica
+            // The strip label shows the live status; log only transitions.
+            if (msg !== win.chiakiStatusMsg)
+                win.log(qsTr("chiaki: %1").arg(msg))
             win.chiakiStatusMsg = msg
-            win.log(qsTr("chiaki: %1").arg(msg))
         }
     }
     onDynamicModeChanged: if (dynamicMode) refreshAvailable()
