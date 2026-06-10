@@ -380,11 +380,17 @@ QtTaskTree::QTaskTree *ChiakiTaskBridge::runGateway(
         [full, ns, line, buf](QProcess &p) {
             p.setProgram(QStringLiteral("python3"));
             p.setArguments(full);
-            if (!ns.isEmpty()) {
-                QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            // Clean env for the gateway: a deployed taskui exports the Qt
+            // 6.11 kit on LD_LIBRARY_PATH (launcher), which poisons PySide6's
+            // bundled Qt inside the python child and kills the QtRO replica.
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            for (const char *var : {"LD_LIBRARY_PATH", "QT_PLUGIN_PATH",
+                                    "QML_IMPORT_PATH", "QML2_IMPORT_PATH",
+                                    "QT_QPA_PLATFORM_PLUGIN_PATH"})
+                env.remove(QLatin1String(var));
+            if (!ns.isEmpty())
                 env.insert(QStringLiteral("CHIAKI_LEARNING_NAMESPACE"), ns);
-                p.setProcessEnvironment(env);
-            }
+            p.setProcessEnvironment(env);
             QObject::connect(&p, &QProcess::readyReadStandardOutput, &p, [pp = &p, buf, line]() {
                 const QString s = QString::fromUtf8(pp->readAllStandardOutput());
                 buf->append(s);
