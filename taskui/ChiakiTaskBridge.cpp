@@ -492,8 +492,9 @@ struct ConsoleCreds {
 };
 ConsoleCreds consoleCreds()
 {
-    QSettings s(QSettings::IniFormat, QSettings::UserScope,
-                QStringLiteral("Chiaki"), QStringLiteral("Chiaki"));
+    // Native format: on Linux this is ~/.config/Chiaki/Chiaki.conf (the
+    // explicit IniFormat would look for Chiaki.ini instead).
+    QSettings s(QStringLiteral("Chiaki"), QStringLiteral("Chiaki"));
     ConsoleCreds creds;
     const int n = s.beginReadArray(QStringLiteral("registered_hosts"));
     if (n > 0) {

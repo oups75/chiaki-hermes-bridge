@@ -264,6 +264,43 @@ private slots:
         QCOMPARE(done.first().first().value<DoneWith>(), DoneWith::Success);
     }
 
+    void startSessionStreamsWhenReady()
+    {
+        // Fake gateway: discover-console reports a ready PS5; fake chiaki
+        // binary accepts the stream invocation. Exercises the full
+        // discover -> launchSession chain (wakeup branch is skipped).
+        const QString fake = tmp.path() + "/fake_gw3.py";
+        { QFile f(fake); QVERIFY(f.open(QIODevice::WriteOnly));
+          f.write("import sys\n"
+                  "if 'discover-console' in sys.argv:\n"
+                  "    print('{\"ok\": true, \"consoles\": [{\"host\": \"127.0.0.1\", \"state\": \"ready\"}]}')\n"); }
+        const QString root = tmp.path() + "/chiakiroot3";
+        QDir().mkpath(root + "/bin");
+        { QFile f(root + "/bin/chiaki"); QVERIFY(f.open(QIODevice::WriteOnly));
+          f.write("#!/bin/sh\nsleep 0.4\n[ \"$1\" = stream ]\n");
+          f.setPermissions(f.permissions() | QFileDevice::ExeOwner); }
+
+        ChiakiTaskBridge bridge;
+        bridge.setGatewayScript(fake);
+        bridge.setChiakiRoot(root);
+
+        // Needs a registered console in ~/.config/Chiaki/Chiaki.conf for the
+        // nickname; skip on machines without one.
+        QSignalSpy err(&bridge, &ChiakiTaskBridge::errorOccurred);
+        QSignalSpy out(&bridge, &ChiakiTaskBridge::runOutput);
+        QSignalSpy running(&bridge, &ChiakiTaskBridge::chiakiRunningChanged);
+        bridge.startSession(QStringLiteral("demo"));
+        if (!err.isEmpty()
+            && err.first().first().toString().contains(QStringLiteral("no registered console")))
+            QSKIP("no registered console in Chiaki.conf");
+
+        QVERIFY(out.wait(5000)); // "PS5 127.0.0.1 ready — starting stream"
+        QVERIFY(out.first().first().toString().contains(QStringLiteral("ready")));
+        QTRY_VERIFY_WITH_TIMEOUT(bridge.chiakiRunning(), 5000); // stream task up
+        QTRY_VERIFY_WITH_TIMEOUT(!bridge.chiakiRunning(), 5000); // fake exits
+        Q_UNUSED(running);
+    }
+
     void classifyParsesPage()
     {
         // Fake gateway that prints a classify result.
