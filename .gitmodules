@@ -1,0 +1,3 @@
+[submodule "taskui/tasktree"]
+	path = taskui/tasktree
+	url = git@github.com:oups75/soloway-qt-tasktree.git

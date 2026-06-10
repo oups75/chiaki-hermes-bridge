@@ -425,6 +425,41 @@ class RemoteControllerClient:
 
         return result[0] if result else b""
 
+    def record_task(self, name: str, duration_ms: int) -> list[dict]:
+        """Drive the RemoteController task-recorder: arm recording, collect
+        recordedEventCaptured events for duration_ms, then stop."""
+        events: list[dict] = []
+        loop = QEventLoop()
+
+        def on_event(ev):
+            try:
+                data = dict(ev)
+            except Exception:
+                data = {"raw": ev}
+            shot = data.get("screenshot")
+            if isinstance(shot, QByteArray):
+                data["screenshot"] = bytes(shot)
+            events.append(data)
+
+        self.replica.recordedEventCaptured.connect(on_event)
+        try:
+            # Dynamic replicas expose invokables as direct callables; the
+            # PySide6 QGenericArgument form is not usable for QString args.
+            self.replica.startTaskRecording(name)
+            QTimer.singleShot(max(0, duration_ms), loop.quit)
+            loop.exec()
+        finally:
+            try:
+                self.replica.stopTaskRecording()
+            except Exception:
+                pass
+            self.app.processEvents()
+            try:
+                self.replica.recordedEventCaptured.disconnect(on_event)
+            except Exception:
+                pass
+        return events
+
     def send(self, button_name: str, interval_ms: int | None = None) -> str:
         button_name = BUTTON_ALIASES.get(button_name, button_name)
         if interval_ms is not None:
@@ -661,6 +696,105 @@ def command_status(args: argparse.Namespace) -> int:
     return 0 if ok and replica_available else 1
 
 
+CONSOLE_CACHE = Path.home() / ".local/share/chiaki-remote-gateway/last_console.json"
+
+
+def _session_peer_host() -> str | None:
+    """IP of the PS5 a live chiaki stream is talking to (UDP peers of the
+    chiaki process), or None. Works without any discovery reply."""
+    try:
+        out = subprocess.run(["ss", "-tunp"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "chiaki" in line and "chiaki-taskui" not in line:
+            m = re.search(r"\s(\d+\.\d+\.\d+\.\d+):(\d+)\s*users:", line)
+            if m and not m.group(1).startswith("127."):
+                return m.group(1)
+    return None
+
+
+def command_discover_console(args: argparse.Namespace) -> int:
+    """PS5 console discovery (chiaki SRCH protocol, UDP 9302).
+
+    Unlike `chiaki discover`, reports the console's IP (recvfrom address) so a
+    session can be started with `chiaki stream <nickname> <host>`. States:
+    "ready" (HTTP 200) or "standby" (HTTP 620, wake with `chiaki wakeup`).
+
+    Resilience: a live stream's peer IP counts as a ready console even when
+    the PS5 ignores discovery; every found host is cached so a sleeping
+    console can still be targeted blind (`cached_host` in the payload).
+    """
+    import socket as _socket
+
+    srch = b"SRCH * HTTP/1.1\ndevice-discovery-protocol-version:00030010\n"
+    timeout_s = max(0.5, args.probe_ms / 1000.0)
+    consoles: dict[str, dict] = {}
+
+    cached_host = None
+    try:
+        cached_host = json.loads(CONSOLE_CACHE.read_text()).get("host")
+    except Exception:
+        pass
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
+    sock.settimeout(0.25)
+    targets = [args.broadcast] if args.broadcast else ["255.255.255.255", "<broadcast>"]
+    if cached_host:
+        targets.append(cached_host)  # unicast probe survives broadcast filtering
+    try:
+        deadline = time.monotonic() + timeout_s
+        for target in targets:
+            try:
+                sock.sendto(srch, (target, 9302))
+            except OSError:
+                continue
+        while time.monotonic() < deadline:
+            try:
+                data, (host, _port) = sock.recvfrom(2048)
+            except (TimeoutError, _socket.timeout):
+                continue
+            text = data.decode("utf-8", errors="replace")
+            first = text.splitlines()[0] if text else ""
+            state = "ready" if " 200 " in f" {first} " else (
+                "standby" if "620" in first else "unknown")
+            fields = {}
+            for line in text.splitlines()[1:]:
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    fields[k.strip()] = v.strip()
+            consoles[host] = {
+                "host": host,
+                "state": state,
+                "name": fields.get("host-name"),
+                "id": fields.get("host-id"),
+                "type": fields.get("host-type"),
+                "source": "discovery",
+            }
+    finally:
+        sock.close()
+
+    # A live stream proves the console is up even if discovery is filtered.
+    peer = _session_peer_host()
+    if peer and peer not in consoles:
+        consoles[peer] = {"host": peer, "state": "ready", "name": None,
+                          "id": None, "type": None, "source": "session"}
+
+    if consoles:
+        try:
+            CONSOLE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            CONSOLE_CACHE.write_text(json.dumps(
+                {"host": next(iter(consoles)), "saved_at": time.time()}))
+        except Exception:
+            pass
+
+    json_print({"ok": bool(consoles), "consoles": list(consoles.values()),
+                "cached_host": cached_host})
+    return 0 if consoles else 1
+
+
 def command_discover_remote(args: argparse.Namespace) -> int:
     ok, py_error = import_pyside6()
     if not ok:
@@ -705,6 +839,8 @@ def command_wait_session(args: argparse.Namespace) -> int:
     t0 = time.monotonic()
     launched = launch_chiaki(args.chiaki_wrapper, args.process_pattern) if should_launch_chiaki(args) else False
     available, error = wait_for_replica(args)
+    # A reachable replica means chiaki is up regardless of who started it.
+    launched = launched or available
     if not available:
         json_print({
             "ok": False,
@@ -1802,6 +1938,46 @@ def command_press(args: argparse.Namespace) -> int:
     return 0 if ok else 2
 
 
+def command_record_task(args: argparse.Namespace) -> int:
+    if should_launch_chiaki(args):
+        launch_chiaki(args.chiaki_wrapper, args.process_pattern)
+    client = RemoteControllerClient(args.remote_url, args.remote_name)
+    if not client.wait_ready(args.timeout_ms):
+        json_print({"ok": False, "error": "RemoteController replica did not initialize"})
+        return 1
+
+    events = client.record_task(args.goal, args.duration_ms)
+
+    store = LearningStore(args.learning_root, namespace=args.namespace)
+    task_dir = store.ns_root / "recordings" / slugify(args.goal)
+    frames_dir = task_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    timeline: list[dict] = []
+    frame_count = 0
+    for index, event in enumerate(events):
+        shot = event.pop("screenshot", None)
+        if shot:
+            frame_path = frames_dir / f"{index:05d}.png"
+            frame_path.write_bytes(shot)
+            event["frame"] = str(frame_path.relative_to(task_dir))
+            frame_count += 1
+        timeline.append(event)
+
+    timeline_path = task_dir / "timeline.json"
+    timeline_path.write_text(json.dumps({"goal": args.goal, "events": timeline}, indent=2))
+    json_print(
+        {
+            "ok": True,
+            "goal": args.goal,
+            "event_count": len(timeline),
+            "frame_count": frame_count,
+            "timeline": str(timeline_path),
+        }
+    )
+    return 0
+
+
 def current_scene_actions(args: argparse.Namespace) -> tuple[int, dict]:
     store = LearningStore(args.learning_root, namespace=args.namespace)
     try:
@@ -1967,6 +2143,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     actions_parser = subparsers.add_parser("actions")
     subparsers.add_parser("discover-remote")
+    discover_console = subparsers.add_parser(
+        "discover-console", help="Discover PS5 consoles on the LAN (IP + power state)")
+    discover_console.add_argument("--broadcast", default=None,
+                                  help="Broadcast/unicast address (default: 255.255.255.255)")
     subparsers.add_parser("status")
     subparsers.add_parser("wait")
     subparsers.add_parser("wait-session")
@@ -2055,6 +2235,13 @@ def build_parser() -> argparse.ArgumentParser:
     press.add_argument("--interval-ms", type=int)
     press.add_argument("button")
 
+    record_task_cmd = subparsers.add_parser("record-task")
+    add_scene_args(record_task_cmd)
+    record_task_cmd.add_argument("goal")
+    record_task_cmd.add_argument(
+        "--duration-ms", type=int, default=15000,
+        help="Demonstration capture window in milliseconds.")
+
     classify = subparsers.add_parser("classify")
     add_scene_args(classify)
     classify.add_argument("--approve", action="store_true", help="Prompt user to approve or correct classification before saving")
@@ -2105,6 +2292,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "discover-remote":
         return command_discover_remote(args)
+    if args.command == "discover-console":
+        return command_discover_console(args)
     try:
         resolve_remote_url(args)
     except RemoteSelectionRequired as exc:
@@ -2147,6 +2336,8 @@ def main() -> int:
         return command_feedback(args)
     if args.command == "press":
         return command_press(args)
+    if args.command == "record-task":
+        return command_record_task(args)
     if args.command == "classify":
         return command_classify(args)
     if args.command == "background-learn":

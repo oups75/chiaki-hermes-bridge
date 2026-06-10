@@ -14,6 +14,7 @@ DEFAULT_STATE_ROOT = Path(
         str(Path.home() / ".local/share/chiaki-remote-gateway/learning"),
     )
 )
+DEFAULT_VISION_MODEL = os.environ.get("CHIAKI_VISION_MODEL", "openai/clip-vit-large-patch14")
 
 
 class SceneLearningError(RuntimeError):
@@ -60,25 +61,26 @@ def update_timing(timing: dict[str, Any] | None, transition_ms: float) -> dict[s
 
 
 class TorchvisionEmbedder:
-    """Embedder using openai/clip-vit-base-patch32 for image classification.
+    """Embedder using the configured CLIP model for image classification.
 
-    Produces 512-dimensional normalized embeddings. Falls back gracefully
-    if CLIP dependencies are missing.
+    Produces normalized embeddings. Defaults to CLIP ViT-L/14 after local
+    Chiaki screenshot evaluation showed better nearest-neighbor accuracy than
+    ViT-B/32. Set CHIAKI_VISION_MODEL to override.
     """
 
-    def __init__(self):
+    def __init__(self, model_name: str | None = None):
         try:
             import torch
             from PIL import Image
-            from transformers import CLIPModel, CLIPProcessor
+            from transformers import CLIPImageProcessor, CLIPModel
         except Exception as exc:
             raise SceneLearningError(f"CLIP dependencies unavailable: {exc}") from exc
 
         self.torch = torch
         self.Image = Image
-        model_name = "openai/clip-vit-base-patch32"
-        self.model = CLIPModel.from_pretrained(model_name)
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        self.model_name = model_name or DEFAULT_VISION_MODEL
+        self.model = CLIPModel.from_pretrained(self.model_name)
+        self.processor = CLIPImageProcessor()
         self.model.eval()
 
     def embed(self, image_path: Path) -> list[float]:
@@ -86,8 +88,6 @@ class TorchvisionEmbedder:
         inputs = self.processor(images=pil_image, return_tensors="pt")
         with self.torch.inference_mode():
             output = self.model.get_image_features(**inputs)
-            # CLIPModel.get_image_features returns BaseModelOutputWithPooling;
-            # use .image_embeds for the projected embedding.
             if hasattr(output, "image_embeds"):
                 vector = output.image_embeds
             elif hasattr(output, "pooler_output"):
@@ -98,76 +98,9 @@ class TorchvisionEmbedder:
             vector = vector / vector.norm().clamp_min(1e-12)
         return [round(float(value), 7) for value in vector.tolist()]
 
-
-class DeepInfraClipClassifier:
-    """Zero-shot CLIP classifier via DeepInfra API.
-
-    Calls openai/clip-vit-base-patch32 on DeepInfra for zero-shot image
-    classification against a set of candidate labels. Used as a fallback
-    when local scene matching does not find a known scene.
-
-    Requires DEEPINFRA_API_KEY in the environment.
-    """
-
-    DEEPINFRA_BASE = "https://api.deepinfra.com/v1/inference/openai/clip-vit-base-patch32"
-
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.environ.get("DEEPINFRA_API_KEY", "")
-        if not self.api_key:
-            raise SceneLearningError(
-                "DEEPINFRA_API_KEY not set — set it in ~/.hermes/.env or "
-                "export DEEPINFRA_API_KEY"
-            )
-
-    def classify(
-        self,
-        image_path: Path,
-        candidate_labels: list[str],
-        timeout: float = 30.0,
-    ) -> dict[str, Any]:
-        import base64
-
-        import requests
-
-        image_b64 = base64.b64encode(image_path.read_bytes()).decode()
-        payload = {
-            "input": {
-                "image": image_b64,
-                "candidate_labels": candidate_labels,
-            }
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        try:
-            resp = requests.post(
-                self.DEEPINFRA_BASE,
-                json=payload,
-                headers=headers,
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            raise SceneLearningError(f"DeepInfra CLIP request failed: {exc}") from exc
-
-        data = resp.json()
-        scores: list[float] = data.get("scores", [])
-        labels: list[str] = data.get("labels", candidate_labels)
-
-        best_idx = max(range(len(scores)), key=lambda i: scores[i]) if scores else -1
-        best_label = labels[best_idx] if best_idx >= 0 else "unknown"
-        best_score = scores[best_idx] if best_idx >= 0 else 0.0
-
-        return {
-            "label": best_label,
-            "score": round(best_score, 6),
-            "all_scores": [
-                {"label": lbl, "score": round(sc, 6)}
-                for lbl, sc in zip(labels, scores)
-            ],
-        }
+    @property
+    def embedding_dim(self) -> int:
+        return int(getattr(self.model.config, "projection_dim", 0))
 
 
 class TorchvisionExporter:
@@ -241,7 +174,7 @@ class TorchvisionExporter:
                         "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
                     ),
                     "embedding_dim": embedding_dim,
-                    "model": "openai/clip-vit-base-patch32",
+                    "model": DEFAULT_VISION_MODEL,
                     "scene_count": len(scenes),
                     "label_count": len(unique_labels),
                 },
@@ -376,13 +309,16 @@ class LearningStore:
     def add_scene(self, label: str, embedding: list[float], metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         scenes = self.scenes()
         scene_id = f"{slugify(label)}-{int(time.time())}"
+        metadata = dict(metadata or {})
+        metadata.setdefault("vision_model", DEFAULT_VISION_MODEL)
+        metadata.setdefault("embedding_dim", len(embedding))
         scene = {
             "id": scene_id,
             "label": label,
             "embedding": embedding,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "namespace": self.namespace,
-            "metadata": metadata or {},
+            "metadata": metadata,
         }
         scenes.append(scene)
         self._write_json(self.scenes_path, scenes)
@@ -415,14 +351,21 @@ class LearningStore:
     def match_scene(self, embedding: list[float], threshold: float = 0.88) -> dict[str, Any]:
         best: dict[str, Any] | None = None
         best_score = 0.0
+        skipped_dim_mismatch = 0
         for scene in self.scenes():
-            score = cosine(embedding, scene.get("embedding", []))
+            scene_embedding = scene.get("embedding", [])
+            if len(embedding) != len(scene_embedding):
+                skipped_dim_mismatch += 1
+                continue
+            score = cosine(embedding, scene_embedding)
             if score > best_score:
                 best = scene
                 best_score = score
         return {
             "matched": best_score >= threshold and best is not None,
             "score": round(best_score, 6),
+            "embedding_dim": len(embedding),
+            "skipped_dim_mismatch": skipped_dim_mismatch,
             "scene": {
                 "id": best.get("id"),
                 "label": best.get("label"),

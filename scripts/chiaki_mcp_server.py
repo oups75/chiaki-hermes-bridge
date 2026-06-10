@@ -343,10 +343,8 @@ async def chiaki_press(params: PressInput) -> str:
 async def chiaki_scene(params: SceneInput) -> str:
     """Capture screenshot and match against learned scenes using CLIP embeddings.
 
-    Falls back to DeepInfra CLIP API when local match score is below threshold.
-
     Returns:
-        JSON with: ok, source, match (matched, score, scene), deepinfra_classification.
+        JSON with: ok, source, match (matched, score, scene).
     """
     args = _scene_args(params) + ["scene"]
     return _fmt(await _run_gateway(*args, timeout=params.timeout_ms / 1000.0 + 20.0))
@@ -374,12 +372,12 @@ async def chiaki_remember_scene(params: RememberSceneInput) -> str:
     annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
 )
 async def chiaki_classify(params: SceneInput) -> str:
-    """Classify current screenshot: local CLIP match first, DeepInfra fallback.
+    """Classify current screenshot with local CLIP matching and OCR text.
 
-    More thorough than chiaki_scene — always attempts both classifiers.
+    More thorough than chiaki_scene because it records OCR text and saves a classification record.
 
     Returns:
-        JSON with: ok, matched, label, method ('local' or 'deepinfra'), scores.
+        JSON with: ok, matched, label, method, local_score, ocr_text.
     """
     args = _scene_args(params) + ["classify"]
     return _fmt(await _run_gateway(*args, timeout=params.timeout_ms / 1000.0 + 30.0))
@@ -619,6 +617,145 @@ def _scene_args(params) -> list[str]:
     if hasattr(params, "namespace"):
         args += ["--namespace", params.namespace]
     return args
+
+
+# ---------------------------------------------------------------------------
+# Persistent replica (signal/slot, cached latest-state)
+# ---------------------------------------------------------------------------
+
+import atexit  # noqa: E402
+import base64  # noqa: E402
+import threading  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).parent))
+import chiaki_replica  # noqa: E402
+
+DEFAULT_REMOTE_NAME = os.environ.get("CHIAKI_REMOTE_CONTROLLER_NAME", "RemoteController")
+LOCAL_REMOTE_URL = "local:chiaki-current-session"
+
+_manager = None
+_manager_lock = threading.Lock()
+
+
+def _resolve_persistent_url() -> str:
+    url = DEFAULT_REMOTE_URL
+    if not url or url == "auto":
+        return LOCAL_REMOTE_URL
+    return url
+
+
+def _get_manager():
+    """Lazily start the single persistent replica manager (thread-safe)."""
+    global _manager
+    with _manager_lock:
+        if _manager is None:
+            mgr = chiaki_replica.ReplicaManager(_resolve_persistent_url(), DEFAULT_REMOTE_NAME)
+            mgr.start(ready_timeout=5.0)
+            atexit.register(mgr.stop)
+            _manager = mgr
+        return _manager
+
+
+def _events_json_safe(events: list) -> list:
+    safe = []
+    for ev in events:
+        item = dict(ev)
+        shot = item.pop("screenshot", None)
+        if shot is not None:
+            try:
+                item["screenshot_bytes"] = len(shot)
+            except Exception:
+                item["screenshot_bytes"] = 0
+        safe.append(item)
+    return safe
+
+
+@mcp.tool(
+    name="chiaki_live_status",
+    description="Persistent-replica status (no per-call reconnect): replica_available, session_connected, last_button, cached event/screenshot sizes.",
+)
+async def chiaki_live_status() -> str:
+    snap = _get_manager().state.snapshot()
+    return _fmt({
+        "ok": True,
+        "remote_url": _resolve_persistent_url(),
+        "replica_available": snap["replica_available"],
+        "session_connected": snap["session_connected"],
+        "last_button": snap["last_button"],
+        "event_count": len(snap["events"]),
+        "screenshot_bytes": len(snap["screenshot"]),
+    })
+
+
+@mcp.tool(
+    name="chiaki_session_state",
+    description="Latest cached Chiaki session state (opened/closed) from the persistent replica.",
+)
+async def chiaki_session_state() -> str:
+    snap = _get_manager().state.snapshot()
+    return _fmt({
+        "ok": True,
+        "session_connected": snap["session_connected"],
+        "replica_available": snap["replica_available"],
+    })
+
+
+@mcp.tool(
+    name="chiaki_recent_events",
+    description="Recent controller/keyboard events captured via the persistent replica (newest last; screenshot bytes summarised).",
+)
+async def chiaki_recent_events(count: int = 50) -> str:
+    events = _get_manager().state.recent_events(max(1, min(count, 256)))
+    return _fmt({"ok": True, "count": len(events), "events": _events_json_safe(events)})
+
+
+@mcp.tool(
+    name="chiaki_live_screenshot",
+    description="Request a fresh frame via the persistent replica and return the cached PNG (base64). No per-call reconnect.",
+)
+async def chiaki_live_screenshot(wait_ms: int = 1500) -> str:
+    mgr = _get_manager()
+    before_seq = mgr.state.snapshot()["screenshot_seq"]
+    mgr.request_screenshot()
+    # Only accept a frame observed AFTER this request; a cached frame with an
+    # unchanged sequence is stale (session loss / no signal / timeout).
+    budget_ms = max(0, min(wait_ms, 5000))
+    waited = 0
+    snap = mgr.state.snapshot()
+    while snap["screenshot_seq"] == before_seq and waited < budget_ms:
+        await asyncio.sleep(0.05)
+        waited += 50
+        snap = mgr.state.snapshot()
+    if snap["screenshot_seq"] == before_seq or not snap["screenshot"]:
+        return _fmt({
+            "ok": False,
+            "error": "no fresh frame",
+            "replica_available": snap["replica_available"],
+            "session_connected": snap["session_connected"],
+        })
+    data = snap["screenshot"]
+    return _fmt({"ok": True, "png_base64": base64.b64encode(data).decode("ascii"), "bytes": len(data)})
+
+
+@mcp.tool(
+    name="chiaki_live_press",
+    description="Send a button via the persistent replica (no per-call reconnect). Returns the last observed button from cache.",
+)
+async def chiaki_live_press(button: str, interval_ms: Optional[int] = None) -> str:
+    if button not in BUTTON_NAMES:
+        return _fmt({"ok": False, "error": f"invalid button: {button}"})
+    mgr = _get_manager()
+    # press() reports whether the replica actually accepted the input; do not
+    # claim success when the replica is unavailable or rejected the property.
+    result = await asyncio.to_thread(mgr.press, button, interval_ms)
+    snap = mgr.state.snapshot()
+    return _fmt({
+        "ok": bool(result.get("ok")),
+        "button": button,
+        "error": result.get("error"),
+        "last_button": snap["last_button"],
+        "session_connected": snap["session_connected"],
+    })
 
 
 # ---------------------------------------------------------------------------
