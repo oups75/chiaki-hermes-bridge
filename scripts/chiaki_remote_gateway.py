@@ -696,6 +696,58 @@ def command_status(args: argparse.Namespace) -> int:
     return 0 if ok and replica_available else 1
 
 
+def command_discover_console(args: argparse.Namespace) -> int:
+    """PS5 console discovery (chiaki SRCH protocol, UDP 9302).
+
+    Unlike `chiaki discover`, reports the console's IP (recvfrom address) so a
+    session can be started with `chiaki stream <nickname> <host>`. States:
+    "ready" (HTTP 200) or "standby" (HTTP 620, wake with `chiaki wakeup`).
+    """
+    import socket as _socket
+
+    srch = b"SRCH * HTTP/1.1\ndevice-discovery-protocol-version:00030010\n"
+    timeout_s = max(0.5, args.probe_ms / 1000.0)
+    consoles: dict[str, dict] = {}
+
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
+    sock.settimeout(0.25)
+    targets = [args.broadcast] if args.broadcast else ["255.255.255.255", "<broadcast>"]
+    try:
+        deadline = time.monotonic() + timeout_s
+        for target in targets:
+            try:
+                sock.sendto(srch, (target, 9302))
+            except OSError:
+                continue
+        while time.monotonic() < deadline:
+            try:
+                data, (host, _port) = sock.recvfrom(2048)
+            except (TimeoutError, _socket.timeout):
+                continue
+            text = data.decode("utf-8", errors="replace")
+            first = text.splitlines()[0] if text else ""
+            state = "ready" if " 200 " in f" {first} " else (
+                "standby" if "620" in first else "unknown")
+            fields = {}
+            for line in text.splitlines()[1:]:
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    fields[k.strip()] = v.strip()
+            consoles[host] = {
+                "host": host,
+                "state": state,
+                "name": fields.get("host-name"),
+                "id": fields.get("host-id"),
+                "type": fields.get("host-type"),
+            }
+    finally:
+        sock.close()
+
+    json_print({"ok": bool(consoles), "consoles": list(consoles.values())})
+    return 0 if consoles else 1
+
+
 def command_discover_remote(args: argparse.Namespace) -> int:
     ok, py_error = import_pyside6()
     if not ok:
@@ -2042,6 +2094,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     actions_parser = subparsers.add_parser("actions")
     subparsers.add_parser("discover-remote")
+    discover_console = subparsers.add_parser(
+        "discover-console", help="Discover PS5 consoles on the LAN (IP + power state)")
+    discover_console.add_argument("--broadcast", default=None,
+                                  help="Broadcast/unicast address (default: 255.255.255.255)")
     subparsers.add_parser("status")
     subparsers.add_parser("wait")
     subparsers.add_parser("wait-session")
@@ -2187,6 +2243,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "discover-remote":
         return command_discover_remote(args)
+    if args.command == "discover-console":
+        return command_discover_console(args)
     try:
         resolve_remote_url(args)
     except RemoteSelectionRequired as exc:

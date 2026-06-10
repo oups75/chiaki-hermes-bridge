@@ -4,11 +4,12 @@ import QtQuick.Layouts
 import Soloway.QtTaskTree
 
 // Editor dialog for a task (goal) or a step (PS5 action). Handles both create and
-// edit via `mode` + `targetId`. Writes through the bound TaskTreeModel.
+// edit via `mode` + `targetId`. Writes through the bound task API — either a
+// TaskTreeModel or a RemoteTaskClient (same addTask/updateTask/taskInfo shape).
 Dialog {
     id: dlg
 
-    required property TaskTreeModel model
+    required property var model
     property var bridge: null           // ChiakiTaskBridge for capture-on-attach
     property string ns: ""
     property string mode: "step"      // "task" | "step"

@@ -7,17 +7,18 @@
 #include <functional>
 #include <QtQml/qqmlregistration.h>
 
-#include "TaskTreeModel.h"
+#include "RemoteTaskClient.h"
 
-class QProcess;
+class ChiakiProcess;
 class QFileSystemWatcher;
 namespace QtTaskTree { class QTaskTree; }
 
 // ChiakiTaskBridge — glue between the learned PS5 tasks on disk
-// (<learningRoot>/<namespace>/tasks.json) and a TaskTreeModel:
-//   import: tasks.json -> model (task -> Group node, steps -> child nodes;
-//           edits flow to the model's store, e.g. CouchTaskStore -> save to Couch).
-//   export: model -> tasks.json (round-trips edits back to the learned store).
+// (<learningRoot>/<namespace>/tasks.json) and the shared task tree served by
+// tasktree-mcp over Qt Remote Objects (RemoteTaskClient):
+//   import: tasks.json -> remote tree (task -> Group node, steps -> children;
+//           mutations are service RPCs, the host persists via its store).
+//   export: the client's live model replica -> tasks.json.
 //   run:    invokes chiaki_remote_gateway.py run-task --goal <goal> on the live
 //           PlayStation session, streaming output.
 class ChiakiTaskBridge : public QObject
@@ -41,22 +42,40 @@ public:
     bool running() const;
     bool chiakiRunning() const;
 
-    // Chiaki app lifecycle — direct QProcess for full control over env + handle.
-    // Launches <chiakiRoot>/bin/chiaki with the env from bin/chiaki-launch.
+    // Chiaki app lifecycle — ChiakiProcess (QProcess subclass) for full control
+    // over env + unix child setup. Launches <chiakiRoot>/bin/chiaki with the env
+    // from bin/chiaki-launch. An externally-started chiaki (matching the binary)
+    // is adopted: detected, reported as running, and closable.
     Q_INVOKABLE void launchChiaki();
     Q_INVOKABLE void closeChiaki();
+    Q_INVOKABLE void restartChiaki(); // close + launch
+    // Launch a remote-play session directly via the chiaki CLI
+    // (`chiaki stream <nickname> <host>`), run as a ChiakiProcessTask on a
+    // Qt6::TaskTree. Reuses the same launched-process plumbing as launchChiaki.
+    Q_INVOKABLE void launchSession(const QString &nickname, const QString &host,
+                                   const QStringList &extraArgs = {});
+    // One-button session bootstrap: discover the PS5 on the LAN (gateway
+    // discover-console -> IP + power state), wake it if it is in standby
+    // (chiaki wakeup, retried with re-discovery), then stream directly
+    // (launchSession). Credentials (nickname, regist key) come from the
+    // chiaki GUI config (~/.config/Chiaki/Chiaki.conf).
+    Q_INVOKABLE void startSession(const QString &ns = QString());
+    // Establish/await the PS stream via gateway `wait-session` (uses QProcessTask).
+    Q_INVOKABLE void connectSession(const QString &ns = QString());
     // Probe the live session via the gateway `status` command (uses QProcessTask).
     Q_INVOKABLE void testConnection(const QString &ns = QString());
+    // Refresh the cached external-chiaki-running flag (async pgrep).
+    Q_INVOKABLE void refreshChiakiRunning();
 
     // Namespaces = subdirectories of learningRoot (ps, nhl26, ...).
     Q_INVOKABLE QStringList namespaces() const;
 
     // Replace the model's contents with the tasks of <namespace>. Returns the
     // number of tasks imported (-1 on read error).
-    Q_INVOKABLE int importJson(TaskTreeModel *model, const QString &ns);
+    Q_INVOKABLE int importJson(RemoteTaskClient *client, const QString &ns);
 
     // Serialize the model's task tree back to <namespace>/tasks.json.
-    Q_INVOKABLE bool exportJson(TaskTreeModel *model, const QString &ns);
+    Q_INVOKABLE bool exportJson(RemoteTaskClient *client, const QString &ns);
 
     // Run a learned task on the live session via the gateway.
     Q_INVOKABLE void runTask(const QString &goal, const QString &ns);
@@ -64,8 +83,8 @@ public:
 
     // Watch <ns>/tasks.json; on external write, merge newly-added task keys into
     // the model (live sync of tasks learned by the gateway).
-    Q_INVOKABLE void watchNamespace(TaskTreeModel *model, const QString &ns);
-    Q_INVOKABLE int mergeJson(TaskTreeModel *model, const QString &ns);
+    Q_INVOKABLE void watchNamespace(RemoteTaskClient *client, const QString &ns);
+    Q_INVOKABLE int mergeJson(RemoteTaskClient *client, const QString &ns);
 
     // Classify the current PlayStation screen via the gateway; emits contextChanged
     // with the detected page (for dynamic-mode filtering).
@@ -96,12 +115,15 @@ private:
     QString m_root;
     QString m_gateway;
     QString m_chiakiRoot;
-    QProcess *m_chiaki = nullptr;
+    ChiakiProcess *m_chiaki = nullptr;
+    bool m_extRunning = false; // an externally-started chiaki detected via pgrep
+    int m_sessionAttempts = 0; // wakeup retries within startSession()
     QFileSystemWatcher *m_watcher = nullptr;
-    TaskTreeModel *m_watchModel = nullptr;
+    RemoteTaskClient *m_watchClient = nullptr;
     QString m_watchNs;
     QList<QtTaskTree::QTaskTree *> m_gwTrees;
     QtTaskTree::QTaskTree *m_runTree = nullptr; // active run-task, if any
+    QtTaskTree::QTaskTree *m_sessionTree = nullptr; // active CLI stream session
 
     QString tasksPath(const QString &ns) const;
 
@@ -111,6 +133,6 @@ private:
     QtTaskTree::QTaskTree *runGateway(const QStringList &args, const QString &ns,
                     std::function<void(const QString &out, bool ok)> done,
                     std::function<void(const QString &line)> line = nullptr);
-    QString addTaskFromJson(TaskTreeModel *model, const QString &key,
+    QString addTaskFromJson(RemoteTaskClient *client, const QString &key,
                             const QJsonObject &task, const QString &ns) const;
 };

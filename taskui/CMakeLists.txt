@@ -18,6 +18,8 @@ qt_add_executable(chiaki-taskui
     main.cpp
     ChiakiTaskBridge.cpp
     ChiakiTaskBridge.h
+    ChiakiProcess.cpp
+    ChiakiProcess.h
 )
 qt_add_qml_module(chiaki-taskui
     URI ChiakiTaskUi
@@ -33,7 +35,8 @@ target_link_libraries(chiaki-taskui
 find_package(Qt6 QUIET COMPONENTS Test)
 if(TARGET Qt6::Test)
     enable_testing()
-    add_executable(tst_bridge tst_bridge.cpp ChiakiTaskBridge.cpp ChiakiTaskBridge.h)
+    add_executable(tst_bridge tst_bridge.cpp ChiakiTaskBridge.cpp ChiakiTaskBridge.h
+        ChiakiProcess.cpp ChiakiProcess.h)
     target_link_libraries(tst_bridge
         PRIVATE soloway-qt-tasktree Qt6::Core Qt6::Gui Qt6::Network Qt6::Test)
     add_test(NAME tst_bridge COMMAND tst_bridge)

@@ -1,3 +1,4 @@
+import QtCore
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -5,8 +6,9 @@ import Soloway.QtTaskTree
 import ChiakiTaskUi
 
 // Chiaki PS5 task manager: load learned tasks (tasks.json) per namespace, edit
-// (CRUD on tasks + steps), persist to CouchDB via the model's store, export back
-// to JSON, and run a task on the live PlayStation via the gateway.
+// (CRUD on tasks + steps) on the shared tree served by tasktree-mcp over Qt
+// Remote Objects, export back to JSON, and run a task on the live PlayStation
+// via the gateway. The TreeView binds to the live model replica.
 ApplicationWindow {
     id: win
     width: 660
@@ -14,8 +16,19 @@ ApplicationWindow {
     visible: true
     title: qsTr("Chiaki PS5 Task Manager")
 
-    TaskTreeModel { id: taskModel; store: appStore }
-    TaskRunner { id: runner; model: taskModel }
+    // Env override from main.cpp via setInitialProperties (TASKTREE_RO_URL);
+    // empty when unset — then the persisted Settings value applies.
+    required property string envServerUrl
+
+    // Persisted user configuration (QML Settings rule).
+    Settings {
+        id: settings
+        property string serverUrl: "tcp://127.0.0.1:8792"
+        property string lastNamespace: ""
+        property alias dynamicMode: dynamicCheck.checked
+    }
+
+    RemoteTaskClient { id: remote; url: win.envServerUrl || settings.serverUrl }
     ChiakiTaskBridge { id: bridge }
 
     readonly property string ns: nsCombo.currentText
@@ -30,8 +43,8 @@ ApplicationWindow {
     // Only approved tasks are offered.
     function refreshAvailable() {
         const out = []
-        for (const id of taskModel.rootIds()) {
-            const info = taskModel.taskInfo(id)
+        for (const id of remote.rootIds()) {
+            const info = remote.taskInfo(id)
             const p = info.payload || ({})
             if (p.approved === false)
                 continue
@@ -46,25 +59,44 @@ ApplicationWindow {
 
     function log(line) { logArea.append(line) }
     function approve(id) {
-        const info = taskModel.taskInfo(id)
+        const info = remote.taskInfo(id)
         const p = info.payload || ({})
         p.approved = true
-        taskModel.updateTask(id, { "payload": p })
+        remote.updateTask(id, { "payload": p })
         log(qsTr("approved %1").arg(info.title))
     }
     function refreshNamespaces() {
         const list = bridge.namespaces()
         nsCombo.model = list.length ? list : ["ps"]
+        // Restore the last-used namespace (Settings).
+        const last = nsCombo.find(settings.lastNamespace)
+        if (last >= 0)
+            nsCombo.currentIndex = last
     }
+
+    property bool autoLoaded: false
     Component.onCompleted: {
         refreshNamespaces()
-        // Auto-load the first namespace's learned tasks on startup.
-        if (nsCombo.count > 0) {
-            const n = bridge.importJson(taskModel, ns)
-            if (n >= 0) {
-                log(qsTr("loaded %1 task(s) from %2").arg(n).arg(ns))
-                tree.expandRecursively()
-                bridge.watchNamespace(taskModel, ns) // live-sync newly-learned tasks
+        remote.connectToHost()
+    }
+    // Auto-load the namespace's learned tasks once the server link is up
+    // (import RPCs need a live TaskService replica).
+    Connections {
+        target: remote
+        function onConnectedChanged() {
+            if (!remote.connected) {
+                win.log(qsTr("task server offline (%1)").arg(remote.url))
+                return
+            }
+            win.log(qsTr("task server connected (%1)").arg(remote.url))
+            if (!win.autoLoaded && nsCombo.count > 0) {
+                win.autoLoaded = true
+                const n = bridge.importJson(remote, win.ns)
+                if (n >= 0) {
+                    win.log(qsTr("loaded %1 task(s) from %2").arg(n).arg(win.ns))
+                    tree.expandRecursively()
+                    bridge.watchNamespace(remote, win.ns) // live-sync newly-learned tasks
+                }
             }
         }
     }
@@ -109,7 +141,7 @@ ApplicationWindow {
         }
     }
 
-    StepEditor { id: editor; model: taskModel; bridge: bridge; ns: win.ns }
+    StepEditor { id: editor; model: remote; bridge: bridge; ns: win.ns }
 
     // Floating proxy carrying the dragged task id for drag-drop composition.
     Item {
@@ -131,7 +163,7 @@ ApplicationWindow {
                 required property int index
                 required property string modelData
                 text: modelData
-                onTriggered: taskModel.setStatus(statusMenu.targetId, index)
+                onTriggered: remote.setStatus(statusMenu.targetId, index)
             }
         }
     }
@@ -148,16 +180,18 @@ ApplicationWindow {
                 ComboBox {
                     id: nsCombo
                     Layout.preferredWidth: 140
+                    onActivated: settings.lastNamespace = currentText
                 }
                 ToolButton {
                     text: qsTr("Import")
+                    enabled: remote.connected
                     onClicked: {
-                        const n = bridge.importJson(taskModel, win.ns)
+                        const n = bridge.importJson(remote, win.ns)
                         win.log(n >= 0 ? qsTr("imported %1 task(s) from %2").arg(n).arg(win.ns)
                                        : qsTr("import failed"))
                         if (n >= 0) {
                             tree.expandRecursively()
-                            bridge.watchNamespace(taskModel, win.ns)
+                            bridge.watchNamespace(remote, win.ns)
                             win.currentPage = ""
                             win.refreshAvailable()
                         }
@@ -165,7 +199,8 @@ ApplicationWindow {
                 }
                 ToolButton {
                     text: qsTr("Export JSON")
-                    onClicked: win.log(bridge.exportJson(taskModel, win.ns)
+                    enabled: remote.connected
+                    onClicked: win.log(bridge.exportJson(remote, win.ns)
                                        ? qsTr("exported to %1/tasks.json").arg(win.ns)
                                        : qsTr("export failed"))
                 }
@@ -209,9 +244,29 @@ ApplicationWindow {
                              : bridge.chiakiRunning ? "#ef6c00" : "#c62828"
                     }
                     Label { text: qsTr("Chiaki: %1").arg(win.chiakiStatusMsg); Layout.fillWidth: true }
+                    // Task-server (QtRO) link state.
+                    Label {
+                        text: remote.connected ? qsTr("server ✓") : qsTr("server ✗")
+                        color: remote.connected ? "#2e7d32" : "#c62828"
+                        ToolTip.text: remote.url
+                        ToolTip.visible: serverHover.hovered
+                        HoverHandler { id: serverHover }
+                    }
                     ToolButton { text: qsTr("Test"); onClicked: { win.log(qsTr("testing connection…")); bridge.testConnection(win.ns) } }
+                    ToolButton { text: qsTr("Connect"); enabled: bridge.chiakiRunning && !win.chiakiConnected
+                                 ToolTip.text: qsTr("Wait for the PS stream to come up")
+                                 ToolTip.visible: hovered
+                                 onClicked: { win.log(qsTr("waiting for PS session…")); bridge.connectSession(win.ns) } }
+                    ToolButton { text: qsTr("Start session"); enabled: !bridge.chiakiRunning
+                                 ToolTip.text: qsTr("Discover the PS5, wake it if needed, stream directly")
+                                 ToolTip.visible: hovered
+                                 onClicked: { win.log(qsTr("discovering PS5…")); bridge.startSession(win.ns) } }
                     ToolButton { text: qsTr("Launch"); enabled: !bridge.chiakiRunning
                                  onClicked: { win.log(qsTr("launching chiaki…")); bridge.launchChiaki() } }
+                    ToolButton { text: qsTr("Restart"); enabled: bridge.chiakiRunning
+                                 ToolTip.text: qsTr("Close and relaunch chiaki (recovers a dead stream)")
+                                 ToolTip.visible: hovered
+                                 onClicked: { win.log(qsTr("restarting chiaki…")); bridge.restartChiaki() } }
                     ToolButton { text: qsTr("Close"); enabled: bridge.chiakiRunning
                                  onClicked: win.chiakiConnected ? closeConfirm.open() : bridge.closeChiaki() }
                 }
@@ -270,7 +325,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
-                model: taskModel
+                model: remote.model
                 selectionModel: ItemSelectionModel {}
 
                 // Single column spans the full view width so rows fit the window.
@@ -371,7 +426,7 @@ ApplicationWindow {
                                 text: "🗑"
                                 ToolTip.text: qsTr("Delete")
                                 ToolTip.visible: hovered
-                                onClicked: taskModel.removeTask(del.taskId)
+                                onClicked: remote.removeTask(del.taskId)
                             }
                         }
 
@@ -382,7 +437,7 @@ ApplicationWindow {
                             onDropped: function (drop) {
                                 const sid = dragProxy.taskId
                                 if (sid && sid !== del.taskId) {
-                                    taskModel.moveTask(sid, del.taskId, 0)
+                                    remote.moveTask(sid, del.taskId, 0)
                                     win.log(qsTr("composed: moved into %1").arg(del.title))
                                 }
                             }

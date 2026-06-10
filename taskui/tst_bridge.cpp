@@ -6,17 +6,47 @@
 #include <QJsonArray>
 
 #include "ChiakiTaskBridge.h"
+#include "ChiakiProcess.h"
 #include "TaskTreeModel.h"
+#include "TaskTreeHost.h"
+#include "RemoteTaskClient.h"
 #include "InMemoryTaskStore.h"
 #include "TaskEnums.h"
 
-// Headless check of the chiaki task bridge: import tasks.json -> model, edit,
-// export back -> tasks.json, and the namespace/slugify helpers.
+#include <QtTaskTree/qtasktree.h>
+
+// Headless check of the chiaki task bridge against the QtRO task service:
+// host (store+model) and client share the process over a local socket; the
+// bridge mutates through the client (RPC), assertions read the host model.
 class TstBridge : public QObject
 {
     Q_OBJECT
 private:
     QTemporaryDir tmp;
+    int m_rigSeq = 0;
+
+    struct Rig {
+        InMemoryTaskStore store;
+        TaskTreeModel model;
+        TaskTreeHost host;
+        RemoteTaskClient client;
+    };
+
+    std::unique_ptr<Rig> makeRig()
+    {
+        auto rig = std::make_unique<Rig>();
+        rig->model.setStore(&rig->store);
+        const QString url = QStringLiteral("local:tstbridge_%1_%2")
+                                .arg(QCoreApplication::applicationPid()).arg(++m_rigSeq);
+        rig->host.setUrl(url);
+        rig->host.setModel(&rig->model);
+        if (!rig->host.start())
+            return nullptr;
+        rig->client.setUrl(url);
+        if (!rig->client.connectToHost())
+            return nullptr;
+        return rig;
+    }
 
     void writeSample(const QString &ns)
     {
@@ -48,38 +78,56 @@ private slots:
         bridge.setLearningRoot(tmp.path());
         QVERIFY(bridge.namespaces().contains(QStringLiteral("demo")));
 
-        InMemoryTaskStore store;
-        TaskTreeModel model;
-        model.setStore(&store);
+        auto rig = makeRig();
+        QVERIFY(rig);
+        QTRY_VERIFY_WITH_TIMEOUT(rig->client.connected(), 5000);
 
-        QCOMPARE(bridge.importJson(&model, QStringLiteral("demo")), 1);
-        QCOMPARE(model.rootIds().size(), 1);
-        const QString gid = model.rootIds().first();
-        QCOMPARE(model.task(gid).title, QStringLiteral("open pack"));
-        QCOMPARE(model.children(gid).size(), 2);
-        QCOMPARE(model.children(gid).first().payload.value("button").toString(),
+        QCOMPARE(bridge.importJson(&rig->client, QStringLiteral("demo")), 1);
+        // Group add is blocking, step adds are async — host model settles first.
+        QTRY_COMPARE_WITH_TIMEOUT(rig->model.rootIds().size(), 1, 5000);
+        const QString gid = rig->model.rootIds().first();
+        QCOMPARE(rig->model.task(gid).title, QStringLiteral("open pack"));
+        QTRY_COMPARE_WITH_TIMEOUT(rig->model.children(gid).size(), 2, 5000);
+        QCOMPARE(rig->model.children(gid).first().payload.value("button").toString(),
                  QStringLiteral("cross"));
 
         // Imported (learned) tasks are pending until approved.
-        QCOMPARE(model.task(gid).payload.value("source").toString(), QStringLiteral("learned"));
-        QVERIFY(!model.task(gid).payload.value("approved").toBool());
+        QCOMPARE(rig->model.task(gid).payload.value("source").toString(),
+                 QStringLiteral("learned"));
+        QVERIFY(!rig->model.task(gid).payload.value("approved").toBool());
 
-        // Edit: add a third step (with an expected state) + precondition + approve.
-        const QString sid = model.addTask(gid, QStringLiteral("press circle"),
-                      int(TaskTree::Type::Manual),
-                      QVariantMap{{"button", "circle"}, {"type", "button"},
-                                  {"expected_state", QVariantMap{{"screenshot", "/s/e.png"},
-                                                                 {"scene", "card revealed"}}}});
-        QCOMPARE(model.children(gid).size(), 3);
-        QVariantMap gp = model.task(gid).payload;
+        // Edit via the client: a third step + precondition + approve.
+        rig->client.addTask(gid, QStringLiteral("press circle"),
+                            int(TaskTree::Type::Manual),
+                            QVariantMap{{"button", "circle"}, {"type", "button"},
+                                        {"expected_state", QVariantMap{{"screenshot", "/s/e.png"},
+                                                                       {"scene", "card revealed"}}}});
+        QTRY_COMPARE_WITH_TIMEOUT(rig->model.children(gid).size(), 3, 5000);
+        QVariantMap gp = rig->model.task(gid).payload;
         gp["start_scene"] = "hut store";
         gp["approved"] = true;
         gp["expected_start"] = QVariantMap{{"screenshot", "/s/start.png"}, {"scene", "hut store"}};
-        model.updateTask(gid, {{"payload", gp}});
-        Q_UNUSED(sid);
+        rig->client.updateTask(gid, {{"payload", gp}});
+        QTRY_VERIFY_WITH_TIMEOUT(
+            rig->model.task(gid).payload.value("approved").toBool(), 5000);
 
-        // Export and re-read.
-        QVERIFY(bridge.exportJson(&model, QStringLiteral("demo")));
+        // Export reads the replica — wait for it to mirror the edits. Role data
+        // is lazy-fetched: poll until the newest child's title+payload arrive.
+        QAbstractItemModel *replica = rig->client.model();
+        QTRY_COMPARE_WITH_TIMEOUT(replica->rowCount(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(replica->rowCount(replica->index(0, 0)), 3, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            replica->data(replica->index(0, 0), TaskTreeModel::PayloadRole)
+                .toMap().value("approved").toBool(), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(
+            replica->data(replica->index(2, 0, replica->index(0, 0)),
+                          TaskTreeModel::TitleRole).toString(),
+            QStringLiteral("press circle"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            !replica->data(replica->index(2, 0, replica->index(0, 0)),
+                           TaskTreeModel::PayloadRole).toMap().isEmpty(), 5000);
+
+        QVERIFY(bridge.exportJson(&rig->client, QStringLiteral("demo")));
         QFile f(tmp.path() + "/demo/tasks.json");
         QVERIFY(f.open(QIODevice::ReadOnly));
         const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
@@ -106,12 +154,19 @@ private slots:
         writeSample(QStringLiteral("demo2"));
         ChiakiTaskBridge bridge;
         bridge.setLearningRoot(tmp.path());
-        InMemoryTaskStore store;
-        TaskTreeModel model;
-        model.setStore(&store);
-        bridge.importJson(&model, QStringLiteral("demo2"));
-        bridge.importJson(&model, QStringLiteral("demo2")); // again
-        QCOMPARE(model.rootIds().size(), 1); // not duplicated
+        auto rig = makeRig();
+        QVERIFY(rig);
+        QTRY_VERIFY_WITH_TIMEOUT(rig->client.connected(), 5000);
+
+        bridge.importJson(&rig->client, QStringLiteral("demo2"));
+        QTRY_COMPARE_WITH_TIMEOUT(rig->model.rootIds().size(), 1, 5000);
+        // Replica must mirror the first import (including the lazily-fetched
+        // id role) before re-importing: the bridge collects the ids to replace
+        // from the replica.
+        QTRY_COMPARE_WITH_TIMEOUT(rig->client.rootIds(), rig->model.rootIds(), 5000);
+
+        bridge.importJson(&rig->client, QStringLiteral("demo2")); // again
+        QTRY_COMPARE_WITH_TIMEOUT(rig->model.rootIds().size(), 1, 5000); // not duplicated
     }
 
     void mergeAddsOnlyNewKeys()
@@ -119,11 +174,17 @@ private slots:
         writeSample(QStringLiteral("demo3"));
         ChiakiTaskBridge bridge;
         bridge.setLearningRoot(tmp.path());
-        InMemoryTaskStore store;
-        TaskTreeModel model;
-        model.setStore(&store);
-        bridge.importJson(&model, QStringLiteral("demo3"));
-        QCOMPARE(model.rootIds().size(), 1);
+        auto rig = makeRig();
+        QVERIFY(rig);
+        QTRY_VERIFY_WITH_TIMEOUT(rig->client.connected(), 5000);
+
+        bridge.importJson(&rig->client, QStringLiteral("demo3"));
+        // Wait for the replica to carry the imported task's key (lazy payload).
+        QTRY_COMPARE_WITH_TIMEOUT(rig->model.rootIds().size(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(
+            rig->client.taskInfo(rig->model.rootIds().first())
+                .value("payload").toMap().value("key").toString(),
+            QStringLiteral("open-pack"), 5000);
 
         // Gateway "learns" a new task: rewrite tasks.json with the original + a new one.
         const QString path = tmp.path() + "/demo3/tasks.json";
@@ -134,10 +195,88 @@ private slots:
         { QFile f(path); f.open(QIODevice::WriteOnly | QIODevice::Truncate);
           f.write(QJsonDocument(root).toJson()); }
 
-        QCOMPARE(bridge.mergeJson(&model, QStringLiteral("demo3")), 1); // only the new one
-        QCOMPARE(model.rootIds().size(), 2);
-        // Merging again adds nothing.
-        QCOMPARE(bridge.mergeJson(&model, QStringLiteral("demo3")), 0);
+        QCOMPARE(bridge.mergeJson(&rig->client, QStringLiteral("demo3")), 1); // only the new one
+        QTRY_COMPARE_WITH_TIMEOUT(rig->model.rootIds().size(), 2, 5000);
+        // Merging again adds nothing (replica payloads synced first).
+        QTRY_VERIFY_WITH_TIMEOUT(
+            [&] {
+                const QStringList ids = rig->client.rootIds();
+                if (ids.size() != 2)
+                    return false;
+                for (const QString &id : ids)
+                    if (rig->client.taskInfo(id).value("payload").toMap()
+                            .value("key").toString().isEmpty())
+                        return false;
+                return true;
+            }(), 5000);
+        QCOMPARE(bridge.mergeJson(&rig->client, QStringLiteral("demo3")), 0);
+    }
+
+    void chiakiProcessConfig()
+    {
+        // Fake chiaki root so program/env wiring is observable.
+        const QString root = tmp.path() + "/chiakiroot";
+        QDir().mkpath(root + "/bin");
+
+        ChiakiProcess p;
+        p.setChiakiRoot(root);
+        p.setupStream(QStringLiteral("PS5-test"), QStringLiteral("10.0.0.7"),
+                      {QStringLiteral("--fullscreen")});
+
+        QCOMPARE(p.program(), root + QStringLiteral("/bin/chiaki"));
+        QCOMPARE(p.arguments(),
+                 (QStringList{"stream", "PS5-test", "10.0.0.7", "--fullscreen"}));
+        const QProcessEnvironment env = p.processEnvironment();
+        QVERIFY(env.value("LD_LIBRARY_PATH").startsWith(root + "/lib"));
+        QCOMPARE(env.value("QT_PLUGIN_PATH"), root + "/plugins");
+        QCOMPARE(env.value("QT_WEBENGINE_RESOURCES_PATH"), root + "/resources");
+        // Unix child setup applied (signal reset, fd hygiene, own session).
+        const auto flags = p.unixProcessParameters().flags;
+        QVERIFY(flags & QProcess::UnixProcessFlag::ResetSignalHandlers);
+        QVERIFY(flags & QProcess::UnixProcessFlag::CloseFileDescriptors);
+        QVERIFY(flags & QProcess::UnixProcessFlag::CreateNewSession);
+        QVERIFY(bool(p.childProcessModifier()));
+
+        p.setupGui();
+        QVERIFY(p.arguments().isEmpty());
+    }
+
+    void chiakiProcessTaskRuns()
+    {
+        // Stand-in chiaki binary: succeed iff invoked as `chiaki stream N H`.
+        const QString root = tmp.path() + "/chiakiroot2";
+        QDir().mkpath(root + "/bin");
+        const QString bin = root + "/bin/chiaki";
+        { QFile f(bin); QVERIFY(f.open(QIODevice::WriteOnly));
+          f.write("#!/bin/sh\n[ \"$1\" = stream ] && [ -n \"$2\" ] && [ -n \"$3\" ]\n");
+          f.setPermissions(f.permissions() | QFileDevice::ExeOwner); }
+
+        using namespace QtTaskTree;
+        QTaskTree tree;
+        tree.setRecipe(Group{ChiakiProcessTask(
+            [root](ChiakiProcess &p) {
+                p.setChiakiRoot(root);
+                p.setupStream(QStringLiteral("PS5-test"), QStringLiteral("10.0.0.7"));
+            })});
+        QSignalSpy done(&tree, &QTaskTree::done);
+        tree.start();
+        QVERIFY(done.wait(5000));
+        QCOMPARE(done.first().first().value<DoneWith>(), DoneWith::Success);
+    }
+
+    void classifyParsesPage()
+    {
+        // Fake gateway that prints a classify result.
+        const QString fake = tmp.path() + "/fake_gateway.py";
+        { QFile f(fake); QVERIFY(f.open(QIODevice::WriteOnly));
+          f.write("print('{\"page\": \"hut store\"}')\n"); }
+
+        ChiakiTaskBridge bridge;
+        bridge.setGatewayScript(fake);
+        QSignalSpy spy(&bridge, &ChiakiTaskBridge::contextChanged);
+        bridge.classify(QStringLiteral("demo"));
+        QVERIFY(spy.wait(5000));
+        QCOMPARE(spy.first().first().toString(), QStringLiteral("hut store"));
     }
 
     void captureExpectedReturnsSceneAndPath()
@@ -157,21 +296,6 @@ private slots:
         QVERIFY(spy.wait(5000));
         QCOMPARE(spy.first().at(1).toString(), QStringLiteral("hut store"));
         QVERIFY(spy.first().at(0).toString().contains(QStringLiteral("/screenshots/demo/expected-")));
-    }
-
-    void classifyParsesPage()
-    {
-        // Fake gateway that prints a classify result.
-        const QString fake = tmp.path() + "/fake_gateway.py";
-        { QFile f(fake); QVERIFY(f.open(QIODevice::WriteOnly));
-          f.write("print('{\"page\": \"hut store\"}')\n"); }
-
-        ChiakiTaskBridge bridge;
-        bridge.setGatewayScript(fake);
-        QSignalSpy spy(&bridge, &ChiakiTaskBridge::contextChanged);
-        bridge.classify(QStringLiteral("demo"));
-        QVERIFY(spy.wait(5000));
-        QCOMPARE(spy.first().first().toString(), QStringLiteral("hut store"));
     }
 };
 
