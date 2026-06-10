@@ -4,6 +4,10 @@
     "key": "open-pack",
     "namespace": "demo",
     "updated_at": "2026-06-10T09:00:00Z",
+    "start_scene": "hut store",
+    "end_scene": "hut store",
+    "source": "learned",
+    "approved": true,
     "steps": [
       { "name": "go to unopened packs", "button": "dpad_right", "type": "button", "wait_ms": 300, "scene": "hut store" },
       { "name": "open pack", "button": "cross", "type": "button", "wait_ms": 800, "scene": "" },
@@ -17,10 +21,27 @@
     "key": "hut-auction-search",
     "namespace": "demo",
     "updated_at": "2026-06-10T09:05:00Z",
+    "start_scene": "hut main",
+    "end_scene": "auction search results",
+    "source": "learned",
+    "approved": false,
     "steps": [
       { "name": "open transfer market", "button": "triangle", "type": "button", "wait_ms": 500, "scene": "hut main" },
       { "name": "search players", "button": "cross", "type": "button", "wait_ms": 700, "scene": "auction search" },
       { "name": "wait results", "button": "none", "type": "wait", "wait_ms": 2000, "scene": "auction search results" }
+    ]
+  },
+  "go-to-store": {
+    "goal": "go to store",
+    "key": "go-to-store",
+    "namespace": "demo",
+    "updated_at": "2026-06-10T09:10:00Z",
+    "start_scene": "hut main",
+    "end_scene": "hut store",
+    "source": "learned",
+    "approved": true,
+    "steps": [
+      { "name": "open store tab", "button": "r1", "type": "button", "wait_ms": 600, "scene": "hut store" }
     ]
   }
 }

@@ -23,6 +23,7 @@ int main(int argc, char **argv)
     else
         store = new InMemoryTaskStore;
     store->setParent(&app);
+    store->startWatching(); // CouchDB _changes (no-op for in-memory)
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("appStore"), store);

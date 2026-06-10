@@ -19,6 +19,28 @@ ApplicationWindow {
     ChiakiTaskBridge { id: bridge }
 
     readonly property string ns: nsCombo.currentText
+    readonly property bool dynamicMode: dynamicCheck.checked
+    property string currentPage: ""
+    property var availableList: []
+
+    // Tasks runnable from the current screen: start_scene matches (or empty), or
+    // the task changes context (end_scene set) so it can navigate toward a match.
+    // Only approved tasks are offered.
+    function refreshAvailable() {
+        const out = []
+        for (const id of taskModel.rootIds()) {
+            const info = taskModel.taskInfo(id)
+            const p = info.payload || ({})
+            if (p.approved === false)
+                continue
+            const ss = p.start_scene || ""
+            const es = p.end_scene || ""
+            const match = currentPage === "" || ss === "" || ss === currentPage || es !== ""
+            if (match)
+                out.push({ id: id, title: info.title, start: ss, end: es })
+        }
+        availableList = out
+    }
 
     function log(line) { logArea.append(line) }
     function approve(id) {
@@ -40,6 +62,7 @@ ApplicationWindow {
             if (n >= 0) {
                 log(qsTr("loaded %1 task(s) from %2").arg(n).arg(ns))
                 tree.expandRecursively()
+                bridge.watchNamespace(taskModel, ns) // live-sync newly-learned tasks
             }
         }
     }
@@ -49,7 +72,18 @@ ApplicationWindow {
         function onRunOutput(line) { win.log(line) }
         function onRunFinished(ok) { win.log(ok ? qsTr("✓ task finished") : qsTr("✗ task failed")) }
         function onErrorOccurred(msg) { win.log("! " + msg) }
+        function onContextChanged(page) {
+            win.currentPage = page
+            win.log(qsTr("current screen: %1").arg(page))
+            win.refreshAvailable()
+        }
+        function onTasksMerged(added) {
+            win.log(qsTr("synced %1 newly-learned task(s)").arg(added))
+            tree.expandRecursively()
+            win.refreshAvailable()
+        }
     }
+    onDynamicModeChanged: if (dynamicMode) refreshAvailable()
 
     StepEditor { id: editor; model: taskModel }
 
@@ -97,6 +131,12 @@ ApplicationWindow {
                         const n = bridge.importJson(taskModel, win.ns)
                         win.log(n >= 0 ? qsTr("imported %1 task(s) from %2").arg(n).arg(win.ns)
                                        : qsTr("import failed"))
+                        if (n >= 0) {
+                            tree.expandRecursively()
+                            bridge.watchNamespace(taskModel, win.ns)
+                            win.currentPage = ""
+                            win.refreshAvailable()
+                        }
                     }
                 }
                 ToolButton {
@@ -104,6 +144,23 @@ ApplicationWindow {
                     onClicked: win.log(bridge.exportJson(taskModel, win.ns)
                                        ? qsTr("exported to %1/tasks.json").arg(win.ns)
                                        : qsTr("export failed"))
+                }
+                ToolSeparator {}
+                CheckBox {
+                    id: dynamicCheck
+                    text: qsTr("Dynamic")
+                    ToolTip.text: qsTr("Show only tasks runnable from the current screen")
+                    ToolTip.visible: hovered
+                }
+                ToolButton {
+                    text: qsTr("Refresh ctx")
+                    visible: win.dynamicMode
+                    onClicked: { win.log(qsTr("classifying current screen…")); bridge.classify(win.ns) }
+                }
+                Label {
+                    visible: win.dynamicMode
+                    text: win.currentPage ? qsTr("screen: %1").arg(win.currentPage) : qsTr("screen: ?")
+                    font.italic: true
                 }
                 Item { Layout.fillWidth: true }
                 ToolButton { text: qsTr("+ Task"); onClicked: editor.openNewTask() }
@@ -114,8 +171,56 @@ ApplicationWindow {
             anchors.fill: parent
             spacing: 0
 
+            // Dynamic mode: flat list of tasks runnable from the current screen.
+            ListView {
+                id: dynList
+                visible: win.dynamicMode
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: win.availableList
+                spacing: 2
+                header: ItemDelegate {
+                    width: ListView.view.width
+                    enabled: false
+                    text: win.currentPage
+                          ? qsTr("Available from \"%1\" (%2)").arg(win.currentPage).arg(dynList.count)
+                          : qsTr("All approved tasks (%1) — Refresh ctx to filter by screen").arg(dynList.count)
+                }
+                delegate: ItemDelegate {
+                    required property var modelData
+                    width: ListView.view.width
+                    contentItem: RowLayout {
+                        spacing: 6
+                        Label {
+                            text: modelData.title
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                        }
+                        TaskStatusChip {
+                            visible: modelData.start
+                            status: modelData.start ? modelData.start : ""
+                        }
+                        Label {
+                            visible: modelData.end
+                            text: modelData.end ? "→ " + modelData.end : ""
+                            color: "#888888"
+                            font.italic: true
+                        }
+                        ToolButton {
+                            text: "▶"
+                            ToolTip.text: qsTr("Run on PS5")
+                            ToolTip.visible: hovered
+                            onClicked: { win.log(qsTr("▶ run-task %1").arg(modelData.title));
+                                         bridge.runTask(modelData.title, win.ns) }
+                        }
+                    }
+                }
+            }
+
             TreeView {
                 id: tree
+                visible: !win.dynamicMode
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true

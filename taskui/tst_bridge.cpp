@@ -102,6 +102,47 @@ private slots:
         bridge.importJson(&model, QStringLiteral("demo2")); // again
         QCOMPARE(model.rootIds().size(), 1); // not duplicated
     }
+
+    void mergeAddsOnlyNewKeys()
+    {
+        writeSample(QStringLiteral("demo3"));
+        ChiakiTaskBridge bridge;
+        bridge.setLearningRoot(tmp.path());
+        InMemoryTaskStore store;
+        TaskTreeModel model;
+        model.setStore(&store);
+        bridge.importJson(&model, QStringLiteral("demo3"));
+        QCOMPARE(model.rootIds().size(), 1);
+
+        // Gateway "learns" a new task: rewrite tasks.json with the original + a new one.
+        const QString path = tmp.path() + "/demo3/tasks.json";
+        QJsonObject root = QJsonDocument::fromJson([&] {
+            QFile f(path); f.open(QIODevice::ReadOnly); return f.readAll(); }()).object();
+        root.insert("new-task", QJsonObject{{"goal", "new task"}, {"key", "new-task"},
+                                            {"steps", QJsonArray{}}});
+        { QFile f(path); f.open(QIODevice::WriteOnly | QIODevice::Truncate);
+          f.write(QJsonDocument(root).toJson()); }
+
+        QCOMPARE(bridge.mergeJson(&model, QStringLiteral("demo3")), 1); // only the new one
+        QCOMPARE(model.rootIds().size(), 2);
+        // Merging again adds nothing.
+        QCOMPARE(bridge.mergeJson(&model, QStringLiteral("demo3")), 0);
+    }
+
+    void classifyParsesPage()
+    {
+        // Fake gateway that prints a classify result.
+        const QString fake = tmp.path() + "/fake_gateway.py";
+        { QFile f(fake); QVERIFY(f.open(QIODevice::WriteOnly));
+          f.write("print('{\"page\": \"hut store\"}')\n"); }
+
+        ChiakiTaskBridge bridge;
+        bridge.setGatewayScript(fake);
+        QSignalSpy spy(&bridge, &ChiakiTaskBridge::contextChanged);
+        bridge.classify(QStringLiteral("demo"));
+        QVERIFY(spy.wait(5000));
+        QCOMPARE(spy.first().first().toString(), QStringLiteral("hut store"));
+    }
 };
 
 QTEST_MAIN(TstBridge)

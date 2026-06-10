@@ -6,6 +6,8 @@
 
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QFileSystemWatcher>
+#include <QRegularExpression>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -24,6 +26,15 @@ ChiakiTaskBridge::ChiakiTaskBridge(QObject *parent) : QObject(parent)
     m_root = QDir::homePath() + QStringLiteral("/.local/share/chiaki-remote-gateway/learning");
     // Default gateway: sibling scripts/ of this app's repo.
     m_gateway = QStringLiteral("/run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/chiaki-ng/hermes-bridge/scripts/chiaki_remote_gateway.py");
+
+    m_watcher = new QFileSystemWatcher(this);
+    connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &path) {
+        // Editors rewrite the file (drop the watch); re-add then merge new tasks.
+        if (!m_watcher->files().contains(path) && QFile::exists(path))
+            m_watcher->addPath(path);
+        if (m_watchModel)
+            mergeJson(m_watchModel, m_watchNs);
+    });
 }
 
 void ChiakiTaskBridge::setLearningRoot(const QString &root)
@@ -101,30 +112,97 @@ int ChiakiTaskBridge::importJson(TaskTreeModel *model, const QString &ns)
 
     int count = 0;
     for (auto it = root.begin(); it != root.end(); ++it) {
-        const QJsonObject task = it.value().toObject();
-        const QString goal = task.value(QStringLiteral("goal")).toString(it.key());
-        QVariantMap groupPayload{
-            {QStringLiteral("mode"), QStringLiteral("Sequential")},
-            {QStringLiteral("key"), task.value(QStringLiteral("key")).toString(it.key())},
-            {QStringLiteral("namespace"), ns},
-            {QStringLiteral("updated_at"), task.value(QStringLiteral("updated_at")).toString()},
-            // Preconditions + provenance. Learned tasks are pending until approved.
-            {QStringLiteral("start_scene"), task.value(QStringLiteral("start_scene")).toString()},
-            {QStringLiteral("end_scene"), task.value(QStringLiteral("end_scene")).toString()},
-            {QStringLiteral("source"), task.value(QStringLiteral("source")).toString(QStringLiteral("learned"))},
-            {QStringLiteral("approved"), task.value(QStringLiteral("approved")).toBool(false)}};
-        const QString gid = model->addTask({}, goal, kGroup, groupPayload);
-
-        const QJsonArray steps = task.value(QStringLiteral("steps")).toArray();
-        for (const QJsonValue &sv : steps) {
-            const QJsonObject step = sv.toObject();
-            const QString name = step.value(QStringLiteral("name")).toString(
-                step.value(QStringLiteral("button")).toString(QStringLiteral("step")));
-            model->addTask(gid, name, kManual, step.toVariantMap());
-        }
+        addTaskFromJson(model, it.key(), it.value().toObject(), ns);
         ++count;
     }
     return count;
+}
+
+QString ChiakiTaskBridge::addTaskFromJson(TaskTreeModel *model, const QString &key,
+                                          const QJsonObject &task, const QString &ns) const
+{
+    const QString goal = task.value(QStringLiteral("goal")).toString(key);
+    QVariantMap groupPayload{
+        {QStringLiteral("mode"), QStringLiteral("Sequential")},
+        {QStringLiteral("key"), task.value(QStringLiteral("key")).toString(key)},
+        {QStringLiteral("namespace"), ns},
+        {QStringLiteral("updated_at"), task.value(QStringLiteral("updated_at")).toString()},
+        // Preconditions + provenance. Learned tasks are pending until approved.
+        {QStringLiteral("start_scene"), task.value(QStringLiteral("start_scene")).toString()},
+        {QStringLiteral("end_scene"), task.value(QStringLiteral("end_scene")).toString()},
+        {QStringLiteral("source"), task.value(QStringLiteral("source")).toString(QStringLiteral("learned"))},
+        {QStringLiteral("approved"), task.value(QStringLiteral("approved")).toBool(false)}};
+    const QString gid = model->addTask({}, goal, kGroup, groupPayload);
+
+    const QJsonArray steps = task.value(QStringLiteral("steps")).toArray();
+    for (const QJsonValue &sv : steps) {
+        const QJsonObject step = sv.toObject();
+        const QString name = step.value(QStringLiteral("name")).toString(
+            step.value(QStringLiteral("button")).toString(QStringLiteral("step")));
+        model->addTask(gid, name, kManual, step.toVariantMap());
+    }
+    return gid;
+}
+
+void ChiakiTaskBridge::watchNamespace(TaskTreeModel *model, const QString &ns)
+{
+    m_watchModel = model;
+    m_watchNs = ns;
+    if (!m_watcher->files().isEmpty())
+        m_watcher->removePaths(m_watcher->files());
+    const QString path = tasksPath(ns);
+    if (QFile::exists(path))
+        m_watcher->addPath(path);
+}
+
+int ChiakiTaskBridge::mergeJson(TaskTreeModel *model, const QString &ns)
+{
+    if (!model)
+        return -1;
+    QFile f(tasksPath(ns));
+    if (!f.open(QIODevice::ReadOnly))
+        return -1;
+    const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+
+    // Keys already present (by the task's stored `key`).
+    QStringList existing;
+    for (const QString &id : model->rootIds())
+        existing << model->task(id).payload.value(QStringLiteral("key")).toString();
+
+    int added = 0;
+    for (auto it = root.begin(); it != root.end(); ++it) {
+        const QString key = it.value().toObject().value(QStringLiteral("key")).toString(it.key());
+        if (existing.contains(key))
+            continue;
+        addTaskFromJson(model, it.key(), it.value().toObject(), ns);
+        ++added;
+    }
+    if (added > 0)
+        emit tasksMerged(added);
+    return added;
+}
+
+void ChiakiTaskBridge::classify(const QString &ns)
+{
+    auto *p = new QProcess(this);
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("CHIAKI_LEARNING_NAMESPACE"), ns);
+    p->setProcessEnvironment(env);
+    p->setProcessChannelMode(QProcess::MergedChannels);
+
+    connect(p, &QProcess::finished, this, [this, p](int, QProcess::ExitStatus) {
+        const QString out = QString::fromUtf8(p->readAll());
+        p->deleteLater();
+        // Match `"page": "X"` (JSON) or `page: 'X'` (gateway stderr).
+        static const QRegularExpression re(
+            QStringLiteral("page[\"']?\\s*[:=]\\s*[\"']([^\"']+)[\"']"));
+        const QRegularExpressionMatch m = re.match(out);
+        if (m.hasMatch())
+            emit contextChanged(m.captured(1).trimmed());
+        else
+            emit errorOccurred(QStringLiteral("classify: could not determine page"));
+    });
+    p->start(QStringLiteral("python3"), {m_gateway, QStringLiteral("classify")});
 }
 
 bool ChiakiTaskBridge::exportJson(TaskTreeModel *model, const QString &ns)

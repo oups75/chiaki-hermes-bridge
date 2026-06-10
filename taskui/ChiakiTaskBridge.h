@@ -2,11 +2,13 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QJsonObject>
 #include <QtQml/qqmlregistration.h>
 
 #include "TaskTreeModel.h"
 
 class QProcess;
+class QFileSystemWatcher;
 
 // ChiakiTaskBridge — glue between the learned PS5 tasks on disk
 // (<learningRoot>/<namespace>/tasks.json) and a TaskTreeModel:
@@ -45,6 +47,15 @@ public:
     Q_INVOKABLE void runTask(const QString &goal, const QString &ns);
     Q_INVOKABLE void stopRun();
 
+    // Watch <ns>/tasks.json; on external write, merge newly-added task keys into
+    // the model (live sync of tasks learned by the gateway).
+    Q_INVOKABLE void watchNamespace(TaskTreeModel *model, const QString &ns);
+    Q_INVOKABLE int mergeJson(TaskTreeModel *model, const QString &ns);
+
+    // Classify the current PlayStation screen via the gateway; emits contextChanged
+    // with the detected page (for dynamic-mode filtering).
+    Q_INVOKABLE void classify(const QString &ns);
+
     // Mirror of the gateway slugify (lowercase, non-alnum -> '-').
     Q_INVOKABLE static QString slugify(const QString &text);
 
@@ -54,11 +65,18 @@ signals:
     void runOutput(const QString &line);
     void runFinished(bool ok);
     void errorOccurred(const QString &message);
+    void contextChanged(const QString &page);
+    void tasksMerged(int added);
 
 private:
     QString m_root;
     QString m_gateway;
     QProcess *m_proc = nullptr;
+    QFileSystemWatcher *m_watcher = nullptr;
+    TaskTreeModel *m_watchModel = nullptr;
+    QString m_watchNs;
 
     QString tasksPath(const QString &ns) const;
+    QString addTaskFromJson(TaskTreeModel *model, const QString &key,
+                            const QJsonObject &task, const QString &ns) const;
 };
