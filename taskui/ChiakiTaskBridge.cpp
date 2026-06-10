@@ -20,9 +20,18 @@
 #include <QDateTime>
 #include <QSettings>
 #include <QTimer>
+#include <QLoggingCategory>
 
 #include <QtTaskTree/qtasktree.h>
 #include <QtTaskTree/qprocesstask.h>
+
+// Filterable logging (QT_LOGGING_RULES="soloway.taskui.*.debug=true"):
+//   soloway.taskui.chiaki   — chiaki app/session lifecycle
+//   soloway.taskui.gateway  — gateway subprocess invocations + output
+//   soloway.taskui.bridge   — import/export/merge/watch
+Q_LOGGING_CATEGORY(lcChiaki, "soloway.taskui.chiaki")
+Q_LOGGING_CATEGORY(lcGateway, "soloway.taskui.gateway")
+Q_LOGGING_CATEGORY(lcBridge, "soloway.taskui.bridge")
 
 namespace {
 constexpr int kGroup = int(TaskTree::Type::Group);
@@ -45,6 +54,13 @@ ChiakiTaskBridge::ChiakiTaskBridge(QObject *parent) : QObject(parent)
     // Default gateway: sibling scripts/ of this app's repo.
     m_gateway = QStringLiteral("/run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/chiaki-ng/hermes-bridge/scripts/chiaki_remote_gateway.py");
     m_chiakiRoot = QStringLiteral("/run/media/soloway/workspace/prod/games/ps/chiaki");
+
+    // Poll for externally-started/closed chiaki so the UI reflects a session
+    // that ends outside our control (user closed the window, stream dropped).
+    auto *liveness = new QTimer(this);
+    liveness->setInterval(5000);
+    connect(liveness, &QTimer::timeout, this, &ChiakiTaskBridge::refreshChiakiRunning);
+    liveness->start();
 
     m_watcher = new QFileSystemWatcher(this);
     connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &path) {
@@ -99,6 +115,10 @@ void ChiakiTaskBridge::refreshChiakiRunning()
         const bool ext = (code == 0); // pgrep exit 0 => match
         if (ext != m_extRunning) {
             m_extRunning = ext;
+            qCInfo(lcChiaki) << "external chiaki" << (ext ? "detected" : "gone");
+            if (!ext && !chiakiRunning())
+                emit connectionStatus(false, false,
+                                      QStringLiteral("chiaki closed (session ended)"));
             emit chiakiRunningChanged();
         }
     });
@@ -163,6 +183,8 @@ int ChiakiTaskBridge::importJson(RemoteTaskClient *client, const QString &ns)
         addTaskFromJson(client, it.key(), it.value().toObject(), ns);
         ++count;
     }
+    qCInfo(lcBridge) << "imported" << count << "task(s) from" << ns
+                     << "(replaced" << existing.size() << ")";
     return count;
 }
 
@@ -259,6 +281,8 @@ void ChiakiTaskBridge::captureExpected(const QString &ns)
 
 void ChiakiTaskBridge::classify(const QString &ns)
 {
+    if (!chiakiRunning())
+        qCWarning(lcGateway) << "classify requested but chiaki appears not to be running";
     runGateway({QStringLiteral("classify")}, ns, [this](const QString &out, bool) {
         // Match `"page": "X"` (JSON) or `page: 'X'` (gateway stderr).
         static const QRegularExpression re(
@@ -280,6 +304,7 @@ void ChiakiTaskBridge::classify(const QString &ns)
                     why = v.toObject().value(QStringLiteral("diagnosis")).toString();
                     break;
                 }
+        qCWarning(lcGateway).noquote() << "classify failed, raw output:" << out.trimmed().left(800);
         emit errorOccurred(why.isEmpty()
                                ? QStringLiteral("classify: could not determine page")
                                : QStringLiteral("classify: %1").arg(why));
@@ -344,6 +369,7 @@ QtTaskTree::QTaskTree *ChiakiTaskBridge::runGateway(
     using namespace QtTaskTree;
     QStringList full;
     full << m_gateway << args;
+    qCDebug(lcGateway) << "exec python3" << full;
     auto *tree = new QTaskTree(this);
 
     // The done handler gets a const QProcess (can't drain buffers), so accumulate
@@ -370,7 +396,9 @@ QtTaskTree::QTaskTree *ChiakiTaskBridge::runGateway(
                 buf->append(QString::fromUtf8(pp->readAllStandardError()));
             });
         },
-        [done, buf](const QProcess &, DoneWith dw) {
+        [done, buf, args](const QProcess &, DoneWith dw) {
+            qCDebug(lcGateway).noquote() << args.value(args.size() - 1) << "done," << dw
+                                         << "output:" << buf->trimmed().left(2000);
             if (done)
                 done(*buf, dw == DoneWith::Success);
         });
@@ -431,10 +459,17 @@ void ChiakiTaskBridge::launchChiaki()
     m_chiaki = new ChiakiProcess(this);
     m_chiaki->setChiakiRoot(m_chiakiRoot);
     m_chiaki->setupGui();
-    connect(m_chiaki, &QProcess::started, this, &ChiakiTaskBridge::chiakiRunningChanged);
-    connect(m_chiaki, &QProcess::finished, this, [this](int, QProcess::ExitStatus) {
+    connect(m_chiaki, &QProcess::started, this, [this] {
+        qCInfo(lcChiaki) << "chiaki GUI started, pid" << m_chiaki->processId();
         emit chiakiRunningChanged();
     });
+    connect(m_chiaki, &QProcess::finished, this, [this](int code, QProcess::ExitStatus st) {
+        qCInfo(lcChiaki) << "chiaki GUI exited, code" << code << st;
+        emit connectionStatus(false, chiakiRunning(),
+                              QStringLiteral("chiaki exited (code %1)").arg(code));
+        emit chiakiRunningChanged();
+    });
+    qCInfo(lcChiaki) << "launching chiaki GUI from" << m_chiakiRoot;
     m_chiaki->start();
     if (!m_chiaki->waitForStarted(3000))
         emit errorOccurred(QStringLiteral("failed to launch chiaki: ") + m_chiaki->errorString());
@@ -473,12 +508,16 @@ void ChiakiTaskBridge::launchSession(const QString &nickname, const QString &hos
         });
     tree->setRecipe(Group{task});
     m_sessionTree = tree;
-    connect(tree, &QTaskTree::done, this, [this, tree](DoneWith) {
+    connect(tree, &QTaskTree::done, this, [this, tree](DoneWith dw) {
+        qCInfo(lcChiaki) << "stream session ended," << dw;
         if (m_sessionTree == tree)
             m_sessionTree = nullptr;
         tree->deleteLater();
+        emit connectionStatus(false, chiakiRunning(),
+                              QStringLiteral("stream session ended"));
         emit chiakiRunningChanged();
     });
+    qCInfo(lcChiaki) << "starting CLI stream" << nickname << host << extraArgs;
     tree->start();
     emit chiakiRunningChanged();
 }
@@ -566,6 +605,8 @@ void ChiakiTaskBridge::closeChiaki()
         emit errorOccurred(QStringLiteral("chiaki not running"));
         return;
     }
+    qCInfo(lcChiaki) << "closeChiaki: owned" << (m_chiaki != nullptr)
+                     << "session" << (m_sessionTree != nullptr) << "external" << m_extRunning;
     if (m_sessionTree) {
         // Destroying the tree cancels the ChiakiProcessTask -> kills the stream.
         auto *tree = m_sessionTree;
@@ -621,6 +662,7 @@ void ChiakiTaskBridge::testConnection(const QString &ns)
         QString msg = sess ? QStringLiteral("session connected")
                     : crun ? QStringLiteral("chiaki running, no live session — restart the stream")
                            : QStringLiteral("chiaki not running");
+        qCInfo(lcChiaki) << "testConnection: session" << sess << "chiaki" << crun;
         emit connectionStatus(sess, crun, msg);
     });
 }

@@ -28,6 +28,13 @@ ApplicationWindow {
         property alias dynamicMode: dynamicCheck.checked
     }
 
+    // Filterable UI log (QT_LOGGING_RULES="soloway.taskui.ui.debug=true").
+    LoggingCategory {
+        id: uiLog
+        name: "soloway.taskui.ui"
+        defaultLogLevel: LoggingCategory.Info
+    }
+
     RemoteTaskClient { id: remote; url: win.envServerUrl || settings.serverUrl }
     ChiakiTaskBridge { id: bridge }
 
@@ -57,7 +64,11 @@ ApplicationWindow {
         availableList = out
     }
 
-    function log(line) { logArea.append(line) }
+    // Mirror the on-screen run log into the Qt logging system.
+    function log(line) {
+        console.info(uiLog, line)
+        logArea.append(line)
+    }
     function approve(id) {
         const info = remote.taskInfo(id)
         const p = info.payload || ({})
