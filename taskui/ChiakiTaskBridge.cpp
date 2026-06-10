@@ -571,16 +571,26 @@ void ChiakiTaskBridge::startSession(const QString &ns)
     }
 
     runGateway({QStringLiteral("discover-console")}, ns, [this, ns, creds](const QString &out, bool) {
-        const QJsonArray consoles = extractJson(out).value(QStringLiteral("consoles")).toArray();
-        if (consoles.isEmpty()) {
+        const QJsonObject o = extractJson(out);
+        const QJsonArray consoles = o.value(QStringLiteral("consoles")).toArray();
+        QString host, state;
+        if (!consoles.isEmpty()) {
+            const QJsonObject c = consoles.first().toObject();
+            host = c.value(QStringLiteral("host")).toString();
+            state = c.value(QStringLiteral("state")).toString();
+        } else if (const QString cached = o.value(QStringLiteral("cached_host")).toString();
+                   !cached.isEmpty()) {
+            // No discovery reply but we know where the console last lived:
+            // wake it blind and re-probe (state "standby" reuses the retry loop).
+            host = cached;
+            state = QStringLiteral("standby");
+            emit runOutput(QStringLiteral("PS5 silent — trying cached console %1").arg(host));
+        } else {
             m_sessionAttempts = 0;
             emit errorOccurred(QStringLiteral(
                 "no PS5 found on the LAN (powered off or network disabled in rest mode)"));
             return;
         }
-        const QJsonObject c = consoles.first().toObject();
-        const QString host = c.value(QStringLiteral("host")).toString();
-        const QString state = c.value(QStringLiteral("state")).toString();
 
         if (state == QLatin1String("ready")) {
             m_sessionAttempts = 0;

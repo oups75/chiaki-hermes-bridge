@@ -696,12 +696,35 @@ def command_status(args: argparse.Namespace) -> int:
     return 0 if ok and replica_available else 1
 
 
+CONSOLE_CACHE = Path.home() / ".local/share/chiaki-remote-gateway/last_console.json"
+
+
+def _session_peer_host() -> str | None:
+    """IP of the PS5 a live chiaki stream is talking to (UDP peers of the
+    chiaki process), or None. Works without any discovery reply."""
+    try:
+        out = subprocess.run(["ss", "-tunp"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "chiaki" in line and "chiaki-taskui" not in line:
+            m = re.search(r"\s(\d+\.\d+\.\d+\.\d+):(\d+)\s*users:", line)
+            if m and not m.group(1).startswith("127."):
+                return m.group(1)
+    return None
+
+
 def command_discover_console(args: argparse.Namespace) -> int:
     """PS5 console discovery (chiaki SRCH protocol, UDP 9302).
 
     Unlike `chiaki discover`, reports the console's IP (recvfrom address) so a
     session can be started with `chiaki stream <nickname> <host>`. States:
     "ready" (HTTP 200) or "standby" (HTTP 620, wake with `chiaki wakeup`).
+
+    Resilience: a live stream's peer IP counts as a ready console even when
+    the PS5 ignores discovery; every found host is cached so a sleeping
+    console can still be targeted blind (`cached_host` in the payload).
     """
     import socket as _socket
 
@@ -709,10 +732,18 @@ def command_discover_console(args: argparse.Namespace) -> int:
     timeout_s = max(0.5, args.probe_ms / 1000.0)
     consoles: dict[str, dict] = {}
 
+    cached_host = None
+    try:
+        cached_host = json.loads(CONSOLE_CACHE.read_text()).get("host")
+    except Exception:
+        pass
+
     sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
     sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
     sock.settimeout(0.25)
     targets = [args.broadcast] if args.broadcast else ["255.255.255.255", "<broadcast>"]
+    if cached_host:
+        targets.append(cached_host)  # unicast probe survives broadcast filtering
     try:
         deadline = time.monotonic() + timeout_s
         for target in targets:
@@ -740,11 +771,27 @@ def command_discover_console(args: argparse.Namespace) -> int:
                 "name": fields.get("host-name"),
                 "id": fields.get("host-id"),
                 "type": fields.get("host-type"),
+                "source": "discovery",
             }
     finally:
         sock.close()
 
-    json_print({"ok": bool(consoles), "consoles": list(consoles.values())})
+    # A live stream proves the console is up even if discovery is filtered.
+    peer = _session_peer_host()
+    if peer and peer not in consoles:
+        consoles[peer] = {"host": peer, "state": "ready", "name": None,
+                          "id": None, "type": None, "source": "session"}
+
+    if consoles:
+        try:
+            CONSOLE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            CONSOLE_CACHE.write_text(json.dumps(
+                {"host": next(iter(consoles)), "saved_at": time.time()}))
+        except Exception:
+            pass
+
+    json_print({"ok": bool(consoles), "consoles": list(consoles.values()),
+                "cached_host": cached_host})
     return 0 if consoles else 1
 
 
@@ -792,6 +839,8 @@ def command_wait_session(args: argparse.Namespace) -> int:
     t0 = time.monotonic()
     launched = launch_chiaki(args.chiaki_wrapper, args.process_pattern) if should_launch_chiaki(args) else False
     available, error = wait_for_replica(args)
+    # A reachable replica means chiaki is up regardless of who started it.
+    launched = launched or available
     if not available:
         json_print({
             "ok": False,
