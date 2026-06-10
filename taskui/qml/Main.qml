@@ -46,6 +46,23 @@ ApplicationWindow {
 
     StepEditor { id: editor; model: taskModel }
 
+    readonly property var statusNames: ["Todo", "Ready", "Running", "Done", "Failed", "Blocked"]
+
+    // Shared status picker; statusMenu.targetId set before opening.
+    Menu {
+        id: statusMenu
+        property string targetId: ""
+        Repeater {
+            model: win.statusNames
+            delegate: MenuItem {
+                required property int index
+                required property string modelData
+                text: modelData
+                onTriggered: taskModel.setStatus(statusMenu.targetId, index)
+            }
+        }
+    }
+
     Page {
         anchors.fill: parent
 
@@ -90,11 +107,16 @@ ApplicationWindow {
                 model: taskModel
                 selectionModel: ItemSelectionModel {}
 
+                // Single column spans the full view width so rows fit the window.
+                columnWidthProvider: function (column) { return width }
+                onWidthChanged: forceLayout()
+
                 delegate: TreeViewDelegate {
                     id: del
                     required property string taskId
                     required property string title
                     required property string typeName
+                    required property string statusName
                     required property var payload
 
                     readonly property bool isTask: typeName === "Group"
@@ -107,6 +129,17 @@ ApplicationWindow {
                             font.bold: del.isTask
                             elide: Text.ElideRight
                             Layout.fillWidth: true
+                        }
+                        // Editable lifecycle status (tap to change), tasks only.
+                        TaskStatusChip {
+                            visible: del.isTask
+                            status: del.statusName
+                            TapHandler {
+                                onTapped: {
+                                    statusMenu.targetId = del.taskId
+                                    statusMenu.popup()
+                                }
+                            }
                         }
                         // Step button chip.
                         TaskStatusChip {
