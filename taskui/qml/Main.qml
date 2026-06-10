@@ -25,7 +25,17 @@ ApplicationWindow {
         const list = bridge.namespaces()
         nsCombo.model = list.length ? list : ["ps"]
     }
-    Component.onCompleted: refreshNamespaces()
+    Component.onCompleted: {
+        refreshNamespaces()
+        // Auto-load the first namespace's learned tasks on startup.
+        if (nsCombo.count > 0) {
+            const n = bridge.importJson(taskModel, ns)
+            if (n >= 0) {
+                log(qsTr("loaded %1 task(s) from %2").arg(n).arg(ns))
+                tree.expandRecursively()
+            }
+        }
+    }
 
     Connections {
         target: bridge
