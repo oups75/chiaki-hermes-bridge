@@ -107,7 +107,12 @@ int ChiakiTaskBridge::importJson(TaskTreeModel *model, const QString &ns)
             {QStringLiteral("mode"), QStringLiteral("Sequential")},
             {QStringLiteral("key"), task.value(QStringLiteral("key")).toString(it.key())},
             {QStringLiteral("namespace"), ns},
-            {QStringLiteral("updated_at"), task.value(QStringLiteral("updated_at")).toString()}};
+            {QStringLiteral("updated_at"), task.value(QStringLiteral("updated_at")).toString()},
+            // Preconditions + provenance. Learned tasks are pending until approved.
+            {QStringLiteral("start_scene"), task.value(QStringLiteral("start_scene")).toString()},
+            {QStringLiteral("end_scene"), task.value(QStringLiteral("end_scene")).toString()},
+            {QStringLiteral("source"), task.value(QStringLiteral("source")).toString(QStringLiteral("learned"))},
+            {QStringLiteral("approved"), task.value(QStringLiteral("approved")).toBool(false)}};
         const QString gid = model->addTask({}, goal, kGroup, groupPayload);
 
         const QJsonArray steps = task.value(QStringLiteral("steps")).toArray();
@@ -144,6 +149,10 @@ bool ChiakiTaskBridge::exportJson(TaskTreeModel *model, const QString &ns)
             {QStringLiteral("key"), key},
             {QStringLiteral("namespace"), ns},
             {QStringLiteral("updated_at"), now},
+            {QStringLiteral("start_scene"), t.payload.value(QStringLiteral("start_scene")).toString()},
+            {QStringLiteral("end_scene"), t.payload.value(QStringLiteral("end_scene")).toString()},
+            {QStringLiteral("source"), t.payload.value(QStringLiteral("source"), QStringLiteral("user")).toString()},
+            {QStringLiteral("approved"), t.payload.value(QStringLiteral("approved"), true).toBool()},
             {QStringLiteral("steps"), steps}});
     }
 

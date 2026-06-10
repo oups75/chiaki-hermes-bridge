@@ -21,6 +21,13 @@ ApplicationWindow {
     readonly property string ns: nsCombo.currentText
 
     function log(line) { logArea.append(line) }
+    function approve(id) {
+        const info = taskModel.taskInfo(id)
+        const p = info.payload || ({})
+        p.approved = true
+        taskModel.updateTask(id, { "payload": p })
+        log(qsTr("approved %1").arg(info.title))
+    }
     function refreshNamespaces() {
         const list = bridge.namespaces()
         nsCombo.model = list.length ? list : ["ps"]
@@ -45,6 +52,14 @@ ApplicationWindow {
     }
 
     StepEditor { id: editor; model: taskModel }
+
+    // Floating proxy carrying the dragged task id for drag-drop composition.
+    Item {
+        id: dragProxy
+        property string taskId: ""
+        width: 1; height: 1
+        Drag.active: false
+    }
 
     readonly property var statusNames: ["Todo", "Ready", "Running", "Done", "Failed", "Blocked"]
 
@@ -121,58 +136,105 @@ ApplicationWindow {
 
                     readonly property bool isTask: typeName === "Group"
 
-                    contentItem: RowLayout {
-                        spacing: 6
+                    contentItem: Item {
+                        id: rowRoot
+                        implicitHeight: rowLay.implicitHeight
 
-                        Label {
-                            text: del.title
-                            font.bold: del.isTask
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
-                        }
-                        // Editable lifecycle status (tap to change), tasks only.
-                        TaskStatusChip {
-                            visible: del.isTask
-                            status: del.statusName
-                            TapHandler {
-                                onTapped: {
-                                    statusMenu.targetId = del.taskId
-                                    statusMenu.popup()
+                        RowLayout {
+                            id: rowLay
+                            anchors.fill: parent
+                            spacing: 6
+
+                            // Drag handle (tasks): drop onto another task to nest it.
+                            Label {
+                                visible: del.isTask
+                                text: "⠿"
+                                color: "#888888"
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.OpenHandCursor
+                                    drag.target: dragProxy
+                                    onPressed: {
+                                        dragProxy.taskId = del.taskId
+                                        dragProxy.parent = rowRoot
+                                        dragProxy.x = 0; dragProxy.y = 0
+                                        dragProxy.Drag.active = true
+                                    }
+                                    onReleased: { dragProxy.Drag.drop(); dragProxy.Drag.active = false }
                                 }
                             }
+                            Label {
+                                text: del.title
+                                font.bold: del.isTask
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                            // Pending badge for unapproved learned tasks.
+                            TaskStatusChip {
+                                visible: del.isTask && del.payload && del.payload.approved === false
+                                status: "Pending"
+                            }
+                            // Editable lifecycle status (tap to change), tasks only.
+                            TaskStatusChip {
+                                visible: del.isTask
+                                status: del.statusName
+                                TapHandler {
+                                    onTapped: { statusMenu.targetId = del.taskId; statusMenu.popup() }
+                                }
+                            }
+                            // Step button chip.
+                            TaskStatusChip {
+                                visible: !del.isTask && del.payload && del.payload.button
+                                status: del.payload && del.payload.button ? del.payload.button : ""
+                            }
+                            ToolButton {
+                                text: "✓"
+                                visible: del.isTask && del.payload && del.payload.approved === false
+                                ToolTip.text: qsTr("Approve")
+                                ToolTip.visible: hovered
+                                onClicked: win.approve(del.taskId)
+                            }
+                            ToolButton {
+                                text: "▶"
+                                visible: del.isTask
+                                ToolTip.text: qsTr("Run on PS5")
+                                ToolTip.visible: hovered
+                                onClicked: { win.log(qsTr("▶ run-task %1").arg(del.title));
+                                             bridge.runTask(del.title, win.ns) }
+                            }
+                            ToolButton {
+                                text: "＋"
+                                visible: del.isTask
+                                ToolTip.text: qsTr("Add step")
+                                ToolTip.visible: hovered
+                                onClicked: editor.openNewStep(del.taskId)
+                            }
+                            ToolButton {
+                                text: "✎"
+                                ToolTip.text: qsTr("Edit")
+                                ToolTip.visible: hovered
+                                onClicked: del.isTask ? editor.openEditTask(del.taskId)
+                                                      : editor.openEditStep(del.taskId)
+                            }
+                            ToolButton {
+                                text: "🗑"
+                                ToolTip.text: qsTr("Delete")
+                                ToolTip.visible: hovered
+                                onClicked: taskModel.removeTask(del.taskId)
+                            }
                         }
-                        // Step button chip.
-                        TaskStatusChip {
-                            visible: !del.isTask && del.payload && del.payload.button
-                            status: del.payload && del.payload.button ? del.payload.button : ""
-                        }
-                        ToolButton {
-                            text: "▶"
-                            visible: del.isTask
-                            ToolTip.text: qsTr("Run on PS5")
-                            ToolTip.visible: hovered
-                            onClicked: { win.log(qsTr("▶ run-task %1").arg(del.title));
-                                         bridge.runTask(del.title, win.ns) }
-                        }
-                        ToolButton {
-                            text: "＋"
-                            visible: del.isTask
-                            ToolTip.text: qsTr("Add step")
-                            ToolTip.visible: hovered
-                            onClicked: editor.openNewStep(del.taskId)
-                        }
-                        ToolButton {
-                            text: "✎"
-                            ToolTip.text: qsTr("Edit")
-                            ToolTip.visible: hovered
-                            onClicked: del.isTask ? editor.openEditTask(del.taskId)
-                                                  : editor.openEditStep(del.taskId)
-                        }
-                        ToolButton {
-                            text: "🗑"
-                            ToolTip.text: qsTr("Delete")
-                            ToolTip.visible: hovered
-                            onClicked: taskModel.removeTask(del.taskId)
+
+                        // Dropping a dragged task here nests it under this task.
+                        DropArea {
+                            anchors.fill: parent
+                            enabled: del.isTask
+                            onDropped: function (drop) {
+                                const sid = dragProxy.taskId
+                                if (sid && sid !== del.taskId) {
+                                    taskModel.moveTask(sid, del.taskId, 0)
+                                    win.log(qsTr("composed: moved into %1").arg(del.title))
+                                }
+                            }
                         }
                     }
                 }

@@ -60,10 +60,18 @@ private slots:
         QCOMPARE(model.children(gid).first().payload.value("button").toString(),
                  QStringLiteral("cross"));
 
-        // Edit: add a third step.
+        // Imported (learned) tasks are pending until approved.
+        QCOMPARE(model.task(gid).payload.value("source").toString(), QStringLiteral("learned"));
+        QVERIFY(!model.task(gid).payload.value("approved").toBool());
+
+        // Edit: add a third step + set a precondition scene + approve.
         model.addTask(gid, QStringLiteral("press circle"), int(TaskTree::Type::Manual),
                       QVariantMap{{"button", "circle"}, {"type", "button"}});
         QCOMPARE(model.children(gid).size(), 3);
+        QVariantMap gp = model.task(gid).payload;
+        gp["start_scene"] = "hut store";
+        gp["approved"] = true;
+        model.updateTask(gid, {{"payload", gp}});
 
         // Export and re-read.
         QVERIFY(bridge.exportJson(&model, QStringLiteral("demo")));
@@ -76,6 +84,10 @@ private slots:
         QCOMPARE(task.value("steps").toArray().size(), 3);
         QCOMPARE(task.value("steps").toArray().last().toObject().value("name").toString(),
                  QStringLiteral("press circle"));
+        // Precondition + approval persisted.
+        QCOMPARE(task.value("start_scene").toString(), QStringLiteral("hut store"));
+        QCOMPARE(task.value("source").toString(), QStringLiteral("learned"));
+        QVERIFY(task.value("approved").toBool());
     }
 
     void reimportReplacesContent()

@@ -38,29 +38,45 @@ Dialog {
     function openNewStep(pid) { mode = "step"; targetId = ""; parentId = pid; _reset(); open() }
     function openEditStep(id) { mode = "step"; targetId = id; _load(id); open() }
 
+    property var _loadedPayload: ({})
+
     function _reset() {
         nameField.text = ""
         buttonCombo.currentIndex = 0
         typeCombo.currentIndex = 0
         waitSpin.value = 0
         sceneField.text = ""
+        startSceneField.text = ""
+        endSceneField.text = ""
+        _loadedPayload = ({})
     }
     function _load(id) {
         const info = model.taskInfo(id)
         nameField.text = info.title || ""
         const p = info.payload || ({})
+        _loadedPayload = p
         buttonCombo.currentIndex = Math.max(0, buttonNames.indexOf(p.button || "none"))
         typeCombo.currentIndex = Math.max(0, stepTypes.indexOf(p.type || "button"))
         waitSpin.value = p.wait_ms || 0
         sceneField.text = p.scene || ""
+        startSceneField.text = p.start_scene || ""
+        endSceneField.text = p.end_scene || ""
     }
 
     onAccepted: {
         if (mode === "task") {
-            if (targetId === "")
-                model.addTask("", nameField.text, kGroup, { "mode": "Sequential" })
-            else
-                model.updateTask(targetId, { "title": nameField.text })
+            if (targetId === "") {
+                model.addTask("", nameField.text, kGroup, {
+                    "mode": "Sequential", "source": "user", "approved": true,
+                    "start_scene": startSceneField.text, "end_scene": endSceneField.text
+                })
+            } else {
+                // Merge scenes into the existing payload (keep key/source/approved).
+                const p = Object.assign({}, _loadedPayload)
+                p.start_scene = startSceneField.text
+                p.end_scene = endSceneField.text
+                model.updateTask(targetId, { "title": nameField.text, "payload": p })
+            }
         } else {
             const payload = {
                 "button": buttonCombo.currentText,
@@ -83,6 +99,28 @@ Dialog {
             id: nameField
             Layout.fillWidth: true
             placeholderText: dlg.mode === "task" ? qsTr("e.g. open pack") : qsTr("e.g. press cross")
+        }
+
+        // Task preconditions: page it runs from / page it leaves you on.
+        GridLayout {
+            visible: dlg.mode === "task"
+            columns: 2
+            columnSpacing: 8
+            rowSpacing: 6
+            Layout.fillWidth: true
+
+            Label { text: qsTr("Start scene") }
+            TextField {
+                id: startSceneField
+                placeholderText: qsTr("page this task runs from (e.g. hut store)")
+                Layout.fillWidth: true
+            }
+            Label { text: qsTr("End scene") }
+            TextField {
+                id: endSceneField
+                placeholderText: qsTr("page after it completes (optional)")
+                Layout.fillWidth: true
+            }
         }
 
         GridLayout {
