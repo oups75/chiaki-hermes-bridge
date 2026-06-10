@@ -3,12 +3,15 @@
 #include <QString>
 #include <QStringList>
 #include <QJsonObject>
+#include <QList>
+#include <functional>
 #include <QtQml/qqmlregistration.h>
 
 #include "TaskTreeModel.h"
 
 class QProcess;
 class QFileSystemWatcher;
+namespace QtTaskTree { class QTaskTree; }
 
 // ChiakiTaskBridge — glue between the learned PS5 tasks on disk
 // (<learningRoot>/<namespace>/tasks.json) and a TaskTreeModel:
@@ -23,7 +26,9 @@ class ChiakiTaskBridge : public QObject
     QML_ELEMENT
     Q_PROPERTY(QString learningRoot READ learningRoot WRITE setLearningRoot NOTIFY configChanged)
     Q_PROPERTY(QString gatewayScript READ gatewayScript WRITE setGatewayScript NOTIFY configChanged)
+    Q_PROPERTY(QString chiakiRoot READ chiakiRoot WRITE setChiakiRoot NOTIFY configChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    Q_PROPERTY(bool chiakiRunning READ chiakiRunning NOTIFY chiakiRunningChanged)
 public:
     explicit ChiakiTaskBridge(QObject *parent = nullptr);
 
@@ -31,7 +36,17 @@ public:
     void setLearningRoot(const QString &root);
     QString gatewayScript() const { return m_gateway; }
     void setGatewayScript(const QString &path);
+    QString chiakiRoot() const { return m_chiakiRoot; }
+    void setChiakiRoot(const QString &root);
     bool running() const;
+    bool chiakiRunning() const;
+
+    // Chiaki app lifecycle — direct QProcess for full control over env + handle.
+    // Launches <chiakiRoot>/bin/chiaki with the env from bin/chiaki-launch.
+    Q_INVOKABLE void launchChiaki();
+    Q_INVOKABLE void closeChiaki();
+    // Probe the live session via the gateway `status` command (uses QProcessTask).
+    Q_INVOKABLE void testConnection(const QString &ns = QString());
 
     // Namespaces = subdirectories of learningRoot (ps, nhl26, ...).
     Q_INVOKABLE QStringList namespaces() const;
@@ -67,16 +82,29 @@ signals:
     void errorOccurred(const QString &message);
     void contextChanged(const QString &page);
     void tasksMerged(int added);
+    void chiakiRunningChanged();
+    // replicaAvailable, chiakiRunning, human-readable message.
+    void connectionStatus(bool replicaAvailable, bool chiakiRunning, const QString &message);
 
 private:
     QString m_root;
     QString m_gateway;
-    QProcess *m_proc = nullptr;
+    QString m_chiakiRoot;
+    QProcess *m_chiaki = nullptr;
     QFileSystemWatcher *m_watcher = nullptr;
     TaskTreeModel *m_watchModel = nullptr;
     QString m_watchNs;
+    QList<QtTaskTree::QTaskTree *> m_gwTrees;
+    QtTaskTree::QTaskTree *m_runTree = nullptr; // active run-task, if any
 
     QString tasksPath(const QString &ns) const;
+
+    // Run a gateway subcommand as a Qt6::TaskTree QProcessTask. `done` gets stdout
+    // + success; optional `line` streams stdout lines as they arrive. Returns the
+    // owning task tree (auto-deleted on completion).
+    QtTaskTree::QTaskTree *runGateway(const QStringList &args, const QString &ns,
+                    std::function<void(const QString &out, bool ok)> done,
+                    std::function<void(const QString &line)> line = nullptr);
     QString addTaskFromJson(TaskTreeModel *model, const QString &key,
                             const QJsonObject &task, const QString &ns) const;
 };

@@ -22,6 +22,8 @@ ApplicationWindow {
     readonly property bool dynamicMode: dynamicCheck.checked
     property string currentPage: ""
     property var availableList: []
+    property bool chiakiConnected: false
+    property string chiakiStatusMsg: qsTr("not tested")
 
     // Tasks runnable from the current screen: start_scene matches (or empty), or
     // the task changes context (end_scene set) so it can navigate toward a match.
@@ -82,8 +84,30 @@ ApplicationWindow {
             tree.expandRecursively()
             win.refreshAvailable()
         }
+        function onConnectionStatus(replica, crun, msg) {
+            win.chiakiConnected = replica
+            win.chiakiStatusMsg = msg
+            win.log(qsTr("chiaki: %1").arg(msg))
+        }
     }
     onDynamicModeChanged: if (dynamicMode) refreshAvailable()
+
+    // Confirm before closing chiaki (a live session may be active).
+    Dialog {
+        id: closeConfirm
+        parent: Overlay.overlay
+        width: 340
+        x: Math.round((parent.width - width) / 2)
+        y: Math.round((parent.height - height) / 2)
+        modal: true
+        title: qsTr("Close chiaki?")
+        standardButtons: Dialog.Yes | Dialog.No
+        onAccepted: bridge.closeChiaki()
+        contentItem: Label {
+            text: qsTr("A session may be active. Close chiaki?")
+            wrapMode: Text.WordWrap
+        }
+    }
 
     StepEditor { id: editor; model: taskModel }
 
@@ -170,6 +194,28 @@ ApplicationWindow {
         ColumnLayout {
             anchors.fill: parent
             spacing: 0
+
+            // Chiaki session control strip.
+            ToolBar {
+                Layout.fillWidth: true
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: 6
+                    Label {
+                        text: "●"
+                        font.pixelSize: 16
+                        Layout.leftMargin: 8
+                        color: win.chiakiConnected ? "#2e7d32"
+                             : bridge.chiakiRunning ? "#ef6c00" : "#c62828"
+                    }
+                    Label { text: qsTr("Chiaki: %1").arg(win.chiakiStatusMsg); Layout.fillWidth: true }
+                    ToolButton { text: qsTr("Test"); onClicked: { win.log(qsTr("testing connection…")); bridge.testConnection(win.ns) } }
+                    ToolButton { text: qsTr("Launch"); enabled: !bridge.chiakiRunning
+                                 onClicked: { win.log(qsTr("launching chiaki…")); bridge.launchChiaki() } }
+                    ToolButton { text: qsTr("Close"); enabled: bridge.chiakiRunning
+                                 onClicked: win.chiakiConnected ? closeConfirm.open() : bridge.closeChiaki() }
+                }
+            }
 
             // Dynamic mode: flat list of tasks runnable from the current screen.
             ListView {

@@ -16,6 +16,9 @@
 #include <QJsonArray>
 #include <QDateTime>
 
+#include <QtTaskTree/qtasktree.h>
+#include <QtTaskTree/qprocesstask.h>
+
 namespace {
 constexpr int kGroup = int(TaskTree::Type::Group);
 constexpr int kManual = int(TaskTree::Type::Manual);
@@ -26,6 +29,7 @@ ChiakiTaskBridge::ChiakiTaskBridge(QObject *parent) : QObject(parent)
     m_root = QDir::homePath() + QStringLiteral("/.local/share/chiaki-remote-gateway/learning");
     // Default gateway: sibling scripts/ of this app's repo.
     m_gateway = QStringLiteral("/run/media/soloway/workspace/Devel/Projects/soloway/apps/ps5/chiaki-ng/hermes-bridge/scripts/chiaki_remote_gateway.py");
+    m_chiakiRoot = QStringLiteral("/run/media/soloway/workspace/prod/games/ps/chiaki");
 
     m_watcher = new QFileSystemWatcher(this);
     connect(m_watcher, &QFileSystemWatcher::fileChanged, this, [this](const QString &path) {
@@ -53,9 +57,22 @@ void ChiakiTaskBridge::setGatewayScript(const QString &path)
     emit configChanged();
 }
 
+void ChiakiTaskBridge::setChiakiRoot(const QString &root)
+{
+    if (m_chiakiRoot == root)
+        return;
+    m_chiakiRoot = root;
+    emit configChanged();
+}
+
 bool ChiakiTaskBridge::running() const
 {
-    return m_proc && m_proc->state() != QProcess::NotRunning;
+    return m_runTree != nullptr;
+}
+
+bool ChiakiTaskBridge::chiakiRunning() const
+{
+    return m_chiaki && m_chiaki->state() != QProcess::NotRunning;
 }
 
 QString ChiakiTaskBridge::tasksPath(const QString &ns) const
@@ -184,15 +201,7 @@ int ChiakiTaskBridge::mergeJson(TaskTreeModel *model, const QString &ns)
 
 void ChiakiTaskBridge::classify(const QString &ns)
 {
-    auto *p = new QProcess(this);
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(QStringLiteral("CHIAKI_LEARNING_NAMESPACE"), ns);
-    p->setProcessEnvironment(env);
-    p->setProcessChannelMode(QProcess::MergedChannels);
-
-    connect(p, &QProcess::finished, this, [this, p](int, QProcess::ExitStatus) {
-        const QString out = QString::fromUtf8(p->readAll());
-        p->deleteLater();
+    runGateway({QStringLiteral("classify")}, ns, [this](const QString &out, bool) {
         // Match `"page": "X"` (JSON) or `page: 'X'` (gateway stderr).
         static const QRegularExpression re(
             QStringLiteral("page[\"']?\\s*[:=]\\s*[\"']([^\"']+)[\"']"));
@@ -202,7 +211,6 @@ void ChiakiTaskBridge::classify(const QString &ns)
         else
             emit errorOccurred(QStringLiteral("classify: could not determine page"));
     });
-    p->start(QStringLiteral("python3"), {m_gateway, QStringLiteral("classify")});
 }
 
 bool ChiakiTaskBridge::exportJson(TaskTreeModel *model, const QString &ns)
@@ -245,36 +253,143 @@ bool ChiakiTaskBridge::exportJson(TaskTreeModel *model, const QString &ns)
     return true;
 }
 
+// ── Gateway execution on the Qt6::TaskTree engine (QProcessTask) ─────────────
+QtTaskTree::QTaskTree *ChiakiTaskBridge::runGateway(
+    const QStringList &args, const QString &ns,
+    std::function<void(const QString &, bool)> done,
+    std::function<void(const QString &)> line)
+{
+    using namespace QtTaskTree;
+    QStringList full;
+    full << m_gateway << args;
+    auto *tree = new QTaskTree(this);
+
+    // The done handler gets a const QProcess (can't drain buffers), so accumulate
+    // stdout+stderr into a shared buffer as it arrives.
+    auto buf = std::make_shared<QString>();
+
+    QProcessTask task(
+        [full, ns, line, buf](QProcess &p) {
+            p.setProgram(QStringLiteral("python3"));
+            p.setArguments(full);
+            if (!ns.isEmpty()) {
+                QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+                env.insert(QStringLiteral("CHIAKI_LEARNING_NAMESPACE"), ns);
+                p.setProcessEnvironment(env);
+            }
+            QObject::connect(&p, &QProcess::readyReadStandardOutput, &p, [pp = &p, buf, line]() {
+                const QString s = QString::fromUtf8(pp->readAllStandardOutput());
+                buf->append(s);
+                if (line)
+                    for (const QString &ln : s.split(QLatin1Char('\n'), Qt::SkipEmptyParts))
+                        line(ln.trimmed());
+            });
+            QObject::connect(&p, &QProcess::readyReadStandardError, &p, [pp = &p, buf]() {
+                buf->append(QString::fromUtf8(pp->readAllStandardError()));
+            });
+        },
+        [done, buf](const QProcess &, DoneWith dw) {
+            if (done)
+                done(*buf, dw == DoneWith::Success);
+        });
+
+    tree->setRecipe(Group{task});
+    m_gwTrees.append(tree);
+    connect(tree, &QTaskTree::done, this, [this, tree](DoneWith) {
+        m_gwTrees.removeAll(tree);
+        if (m_runTree == tree) {
+            m_runTree = nullptr;
+            emit runningChanged();
+        }
+        tree->deleteLater();
+    });
+    tree->start();
+    return tree;
+}
+
 void ChiakiTaskBridge::runTask(const QString &goal, const QString &ns)
 {
     if (running()) {
         emit errorOccurred(QStringLiteral("a task is already running"));
         return;
     }
-    m_proc = new QProcess(this);
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert(QStringLiteral("CHIAKI_LEARNING_NAMESPACE"), ns);
-    m_proc->setProcessEnvironment(env);
-    m_proc->setProcessChannelMode(QProcess::MergedChannels);
-
-    connect(m_proc, &QProcess::readyReadStandardOutput, this, [this]() {
-        while (m_proc->canReadLine())
-            emit runOutput(QString::fromUtf8(m_proc->readLine()).trimmed());
-    });
-    connect(m_proc, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) {
-        emit runFinished(code == 0);
-        emit runningChanged();
-        m_proc->deleteLater();
-        m_proc = nullptr;
-    });
-
-    m_proc->start(QStringLiteral("python3"),
-                  {m_gateway, QStringLiteral("run-task"), QStringLiteral("--goal"), goal});
+    m_runTree = runGateway(
+        {QStringLiteral("run-task"), QStringLiteral("--goal"), goal}, ns,
+        [this](const QString &, bool ok) { emit runFinished(ok); },
+        [this](const QString &l) { emit runOutput(l); });
     emit runningChanged();
 }
 
 void ChiakiTaskBridge::stopRun()
 {
-    if (m_proc && m_proc->state() != QProcess::NotRunning)
-        m_proc->terminate();
+    if (m_runTree) {
+        m_gwTrees.removeAll(m_runTree);
+        m_runTree->deleteLater(); // destroying the tree cancels the QProcessTask
+        m_runTree = nullptr;
+        emit runningChanged();
+    }
+}
+
+// ── Chiaki app lifecycle (direct QProcess) ──────────────────────────────────
+void ChiakiTaskBridge::launchChiaki()
+{
+    if (chiakiRunning()) {
+        emit errorOccurred(QStringLiteral("chiaki already running"));
+        return;
+    }
+    const QString root = m_chiakiRoot;
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString ld = env.value(QStringLiteral("LD_LIBRARY_PATH"));
+    env.insert(QStringLiteral("LD_LIBRARY_PATH"),
+               ld.isEmpty() ? root + QStringLiteral("/lib")
+                            : root + QStringLiteral("/lib:") + ld);
+    env.insert(QStringLiteral("QT_PLUGIN_PATH"), root + QStringLiteral("/plugins"));
+    env.insert(QStringLiteral("QML2_IMPORT_PATH"), root + QStringLiteral("/qml"));
+    env.insert(QStringLiteral("QML_IMPORT_PATH"), root + QStringLiteral("/qml"));
+    env.insert(QStringLiteral("QT_QPA_PLATFORM_PLUGIN_PATH"), root + QStringLiteral("/plugins/platforms"));
+    env.insert(QStringLiteral("QTWEBENGINEPROCESS_PATH"), root + QStringLiteral("/resources/QtWebEngineProcess"));
+    env.insert(QStringLiteral("QT_WEBENGINE_RESOURCES_PATH"), root + QStringLiteral("/resources"));
+
+    m_chiaki = new QProcess(this);
+    m_chiaki->setProcessEnvironment(env);
+    m_chiaki->setProgram(root + QStringLiteral("/bin/chiaki"));
+    connect(m_chiaki, &QProcess::started, this, &ChiakiTaskBridge::chiakiRunningChanged);
+    connect(m_chiaki, &QProcess::finished, this, [this](int, QProcess::ExitStatus) {
+        emit chiakiRunningChanged();
+    });
+    m_chiaki->start();
+    if (!m_chiaki->waitForStarted(3000))
+        emit errorOccurred(QStringLiteral("failed to launch chiaki: ") + m_chiaki->errorString());
+}
+
+void ChiakiTaskBridge::closeChiaki()
+{
+    if (!chiakiRunning()) {
+        emit errorOccurred(QStringLiteral("chiaki not running"));
+        return;
+    }
+    m_chiaki->terminate();
+    if (!m_chiaki->waitForFinished(3000))
+        m_chiaki->kill();
+    emit chiakiRunningChanged();
+}
+
+void ChiakiTaskBridge::testConnection(const QString &ns)
+{
+    runGateway({QStringLiteral("status")}, ns, [this](const QString &out, bool) {
+        const int a = out.indexOf(QLatin1Char('{'));
+        const int b = out.lastIndexOf(QLatin1Char('}'));
+        QJsonObject o;
+        if (a >= 0 && b > a)
+            o = QJsonDocument::fromJson(out.mid(a, b - a + 1).toUtf8()).object();
+        const bool replica = o.value(QStringLiteral("replica_available")).toBool();
+        const bool crun = o.value(QStringLiteral("chiaki_running")).toBool();
+        QString msg = replica ? QStringLiteral("session connected")
+                    : crun   ? QStringLiteral("chiaki running, no replica")
+                             : QStringLiteral("chiaki not running");
+        const QJsonValue err = o.value(QStringLiteral("replica_error"));
+        if (!err.isNull() && !err.toString().isEmpty())
+            msg += QStringLiteral(" (%1)").arg(err.toString());
+        emit connectionStatus(replica, crun, msg);
+    });
 }
